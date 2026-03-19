@@ -16,11 +16,24 @@ class User(Base):
     )
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    company_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    tracking_email: Mapped[str | None] = mapped_column(String(255), unique=True, index=True, nullable=True)
+    subscription_status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    magic_link_token: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    auth_token: Mapped[str | None] = mapped_column(String(255), unique=True, index=True, nullable=True)
+    plan: Mapped[str | None] = mapped_column(String(32), nullable=True)             # starter | growth | pro | custom
+    payment_session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    payment_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    payment_pending_plan: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     shipments: Mapped[list["Shipment"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    notify_parties: Mapped[list["NotifyParty"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 
@@ -126,3 +139,80 @@ class AIGeneratedMessage(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class NotifyParty(Base):
+    """
+    A contact that should receive shipment notifications on behalf of the company.
+
+    channel: "email" | "whatsapp"
+    contact_value: email address or phone number (e.g. "233XXXXXXXXX")
+    WhatsApp notify parties require an active subscription.
+    """
+
+    __tablename__ = "notify_parties"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)   # "email" | "whatsapp"
+    contact_value: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    user: Mapped["User"] = relationship(back_populates="notify_parties")
+
+
+class InboundEmail(Base):
+    """
+    Stores every inbound email received via the Postmark webhook.
+
+    User matching: from_email is looked up against users.email.
+    Container extraction: ISO 6346 container numbers found in subject + body.
+    Shipment linking: matched_shipment_ids holds UUIDs of shipments belonging
+    to the matched user whose container_number appears in the email.
+    mem0_stored: True once the email content has been fed into Mem0 for the agent.
+    """
+
+    __tablename__ = "inbound_emails"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    # Matched user — nullable when sender is not a registered user
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    from_email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    from_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    to_email: Mapped[str] = mapped_column(String(512), nullable=False)
+    subject: Mapped[str | None] = mapped_column(Text, nullable=True)
+    body_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    body_html: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Postmark message ID — unique to prevent duplicate processing
+    message_id: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True, index=True)
+    # ISO 6346 container numbers extracted by AI (e.g. ["MSCU1234567"])
+    container_numbers: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Bill of Lading / booking reference numbers extracted by AI
+    bl_numbers: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Shipping carrier/line identified by AI (e.g. "Maersk")
+    carrier: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # One-sentence AI summary of the email
+    email_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # UUIDs (as strings) of shipments in the DB that match containers or BLs found
+    matched_shipment_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Whether this email's context has been stored in Mem0
+    mem0_stored: Mapped[bool] = mapped_column(nullable=False, default=False)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    user: Mapped["User | None"] = relationship()

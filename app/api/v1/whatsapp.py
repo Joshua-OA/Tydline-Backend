@@ -1,9 +1,22 @@
 """
-WhatsApp inbound webhook — receives forwarded payloads from the external
-proxy server, runs the logistics agent, and returns the reply.
+WhatsApp inbound webhook.
+
+Inbound flow (Meta → Proxy → This server):
+  The proxy forwards the raw Meta webhook payload to POST /api/v1/whatsapp/webhook
+  with an added header:  X-Webhook-Secret: {WHATSAPP_WEBHOOK_SECRET}
+
+  We run the logistics agent and return a synchronous reply:
+  { "to": "<phone>", "message": { "type": "text", "content": "<reply>" } }
+
+  If "to" / "message" are omitted the proxy treats the response as "no reply".
+
+Outbound flow (async push) is handled by the notification service via
+POST {WHATSAPP_PROXY_BASE_URL}/whatsapp/external/send with the same secret.
 """
 
 import logging
+import re
+import time
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -16,7 +29,32 @@ from app.core.config import settings
 from app.db.session import get_db
 from app.models.orm import User
 
+# Strip @mentions (e.g. "@15550001234 ") from group message bodies
+_MENTION_RE = re.compile(r"@\d+\s*")
+
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Message ID deduplication — prevents double-processing when the proxy or
+# Meta retries the same webhook delivery.
+# ---------------------------------------------------------------------------
+
+_seen_message_ids: dict[str, float] = {}  # wamid → timestamp
+_DEDUP_TTL = 300  # seconds to remember a message id (5 min)
+
+
+def _is_duplicate(message_id: str) -> bool:
+    """Return True if this message was already processed recently."""
+    now = time.monotonic()
+    # Evict expired entries
+    expired = [k for k, t in _seen_message_ids.items() if now - t > _DEDUP_TTL]
+    for k in expired:
+        del _seen_message_ids[k]
+    if message_id in _seen_message_ids:
+        return True
+    _seen_message_ids[message_id] = now
+    return False
+
 
 # ---------------------------------------------------------------------------
 # Auth dependency — dedicated webhook secret
@@ -45,12 +83,19 @@ class WhatsAppTextBody(BaseModel):
     body: str
 
 
+class WhatsAppMessageContext(BaseModel):
+    """Present when a message is sent in a group or as a reply."""
+    group_id: str | None = None
+    id: str | None = None  # quoted message id
+
+
 class WhatsAppMessage(BaseModel):
     from_: str = Field(alias="from")
     id: str
     timestamp: str
     type: str
     text: WhatsAppTextBody | None = None
+    context: WhatsAppMessageContext | None = None  # set for group messages
 
 
 class WhatsAppMetadata(BaseModel):
@@ -155,14 +200,24 @@ async def whatsapp_webhook(
         msg = messages[0]
         sender_phone = _normalize_phone(msg.from_)
 
+        # --- Deduplication -----------------------------------------------------
+        if _is_duplicate(msg.id):
+            logger.info("Duplicate webhook for message %s — skipping", msg.id)
+            return _make_reply(sender_phone, "")
+
         # --- Non-text messages -------------------------------------------------
         if msg.type != "text" or msg.text is None:
             logger.info("Non-text message (type=%s) from %s — skipping", msg.type, sender_phone[-4:])
             return _make_reply(sender_phone, TEXT_ONLY_MESSAGE)
 
-        message_text = msg.text.body.strip()
+        # Strip @mentions so group messages work cleanly with the agent
+        message_text = _MENTION_RE.sub("", msg.text.body).strip()
         if not message_text:
             return _make_reply(sender_phone, TEXT_ONLY_MESSAGE)
+
+        is_group = msg.context is not None and msg.context.group_id is not None
+        if is_group:
+            logger.info("Group message from ...%s (group %s)", sender_phone[-4:], msg.context.group_id)
 
         # --- User lookup by phone ----------------------------------------------
         result = await db.execute(select(User).where(User.phone == sender_phone))

@@ -2,14 +2,14 @@ import logging
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.api.v1.router import router as v1_router
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal
-from app.observability.langfuse import LangfuseRequestMiddleware, flush, get_langfuse
+from app.observability.logfire_setup import configure_logfire
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,11 +18,27 @@ logging.basicConfig(
 logger = logging.getLogger("tydline")
 
 
+async def _log_raw_request(request: Request) -> None:
+    """Log every incoming request with headers and body for local debugging."""
+    body = await request.body()
+    logger.info(
+        "\n─── INCOMING REQUEST ───────────────────────────────\n"
+        "  %s %s\n"
+        "  Headers: %s\n"
+        "  Body: %s\n"
+        "────────────────────────────────────────────────────",
+        request.method,
+        request.url,
+        dict(request.headers),
+        body.decode("utf-8", errors="replace")[:2000],
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown lifecycle."""
+    configure_logfire()
     yield
-    flush()
 
 
 def create_app() -> FastAPI:
@@ -53,12 +69,25 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Observability: trace every HTTP request in Langfuse (no-op if not configured)
-    if LangfuseRequestMiddleware is not None:
-        app.add_middleware(LangfuseRequestMiddleware)
+    # In development: log every raw request so webhook payloads are visible
+    if not is_production:
+        @app.middleware("http")
+        async def debug_request_logger(request: Request, call_next):
+            await _log_raw_request(request)
+            return await call_next(request)
 
     # Register routers
     app.include_router(v1_router)
+
+    # Catch-all: log unmatched routes clearly instead of silent 404
+    @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)
+    async def catch_all(path: str, request: Request):
+        from fastapi.responses import JSONResponse
+        logger.warning("No route matched: %s %s — check your proxy webhook URL", request.method, request.url)
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"No route matched: {request.method} /{path}", "registered_webhook": "/api/v1/whatsapp/webhook"},
+        )
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict[str, str]:
@@ -110,9 +139,6 @@ def create_app() -> FastAPI:
         else:
             groq_status = "not_configured"
 
-        # Langfuse
-        langfuse_status = "configured" if get_langfuse() is not None else "not_configured"
-
         overall = "ok" if db_status == "connected" else "degraded"
 
         return {
@@ -121,7 +147,7 @@ def create_app() -> FastAPI:
             "database": db_status,
             "shipsgo_api": shipsgo_status,
             "groq_api": groq_status,
-            "langfuse": langfuse_status,
+            "logfire": "configured" if settings.logfire_token else "not_configured",
         }
 
     return app
