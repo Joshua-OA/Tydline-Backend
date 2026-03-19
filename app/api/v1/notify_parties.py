@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_auth_token
-from app.core.plans import get_user_features
+from app.core.plans import get_test_features, get_user_features, is_test_account
 from app.db.session import get_db
 from app.models.orm import NotifyParty, User
 
@@ -82,7 +82,7 @@ async def add_notify_party(
     - Starter plan: only one channel allowed across all notify parties.
     - Growth / Pro: email + WhatsApp simultaneously.
     """
-    features = get_user_features(current_user.plan, current_user.subscription_status)
+    features = get_test_features() if is_test_account(current_user) else get_user_features(current_user.plan, current_user.subscription_status)
 
     if features is None:
         raise HTTPException(

@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app.api.deps import require_auth_token
-from app.core.plans import PLANS, PlanDefinition, PlanFeatures, get_user_features
+from app.core.plans import PLANS, PlanDefinition, PlanFeatures, get_test_features, get_user_features, is_test_account
 from app.models.orm import User
 
 router = APIRouter(prefix="/account", tags=["account"])
@@ -44,6 +44,15 @@ async def get_plan(current_user: CurrentUserDep) -> UserPlanResponse:
     Use feature flags to show/hide gated settings in the dashboard.
     """
     from app.core.plans import get_plan as _get_plan
+
+    if is_test_account(current_user):
+        return UserPlanResponse(
+            subscription_status="active",
+            plan="pro",
+            plan_name="Pro",
+            price_usd=None,
+            features=get_test_features(),
+        )
 
     plan_def = _get_plan(current_user.plan)
     features = get_user_features(current_user.plan, current_user.subscription_status)

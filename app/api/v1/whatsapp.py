@@ -17,6 +17,7 @@ POST {WHATSAPP_PROXY_BASE_URL}/whatsapp/external/send with the same secret.
 import logging
 import re
 import time
+import uuid as _uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -27,7 +28,55 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.logistics import run_agent
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.orm import User
+from app.models.orm import Shipment, User
+
+async def _extract_and_create_shipments(
+    text: str, user: User, db: AsyncSession
+) -> tuple[list[str], list[str]]:
+    """
+    Use AI to extract container and BL numbers from *text*, create any new
+    shipments, and return (container_numbers, bl_numbers).
+    """
+    from app.services.ai import extract_email_shipment_data
+
+    result = await extract_email_shipment_data(subject="", body=text)
+    if not result:
+        return [], []
+
+    containers = [c.upper() for c in (result.get("container_numbers") or [])]
+    bls = [b.upper() for b in (result.get("bl_numbers") or [])]
+    carrier = result.get("carrier") or None
+
+    if not containers and not bls:
+        return [], []
+
+    # Find existing shipments to avoid duplicates
+    from sqlalchemy import or_
+    filters = []
+    if containers:
+        filters.append(Shipment.container_number.in_(containers))
+    if bls:
+        filters.append(Shipment.bill_of_lading.in_(bls))
+
+    existing = (await db.execute(
+        select(Shipment).where(Shipment.user_id == user.id, or_(*filters))
+    )).scalars().all()
+
+    existing_containers = {s.container_number for s in existing}
+    existing_bls = {s.bill_of_lading for s in existing if s.bill_of_lading}
+
+    for container in containers:
+        if container not in existing_containers:
+            s = Shipment(container_number=container, carrier=carrier, user_id=user.id, status="pending_approval")
+            db.add(s)
+
+    for bl in bls:
+        if bl not in existing_bls:
+            s = Shipment(bill_of_lading=bl, container_number=f"BL-{bl[:10]}", carrier=carrier, user_id=user.id, status="pending_approval")
+            db.add(s)
+
+    await db.commit()
+    return containers, bls
 
 # Strip @mentions (e.g. "@15550001234 ") from group message bodies
 _MENTION_RE = re.compile(r"@\d+\s*")
@@ -84,9 +133,11 @@ class WhatsAppTextBody(BaseModel):
 
 
 class WhatsAppMessageContext(BaseModel):
-    """Present when a message is sent in a group or as a reply."""
+    """Present when a message is sent in a group, as a reply, or forwarded."""
     group_id: str | None = None
     id: str | None = None  # quoted message id
+    forwarded: bool = False
+    frequently_forwarded: bool = False
 
 
 class WhatsAppMessage(BaseModel):
@@ -227,9 +278,44 @@ async def whatsapp_webhook(
             logger.info("Unregistered phone %s — rejecting", sender_phone[-4:])
             return _make_reply(sender_phone, UNREGISTERED_MESSAGE)
 
+        is_forwarded = msg.context is not None and msg.context.forwarded
+
+        # --- Forwarded message: extract shipping data, skip agent --------------
+        if is_forwarded:
+            logger.info("Forwarded message from ...%s — extracting shipping data", sender_phone[-4:])
+            containers, bls = await _extract_and_create_shipments(message_text, user, db)
+            if containers or bls:
+                lines = []
+                if bls:
+                    lines.append("BL number(s): " + ", ".join(bls))
+                if containers:
+                    lines.append("Container(s): " + ", ".join(containers))
+                items = "\n• ".join(lines)
+                reply = f"The following shipment(s) have been added:\n• {items}\n\nWould you like to approve them to begin tracking?"
+            else:
+                reply = "I received the forwarded message but couldn't find any container or BL numbers in it. Please forward a message that includes a BL or container number."
+            return _make_reply(sender_phone, reply)
+
+        # --- Direct message: extract any shipping refs then run agent ----------
+        containers, bls = await _extract_and_create_shipments(message_text, user, db)
+
+        agent_message = message_text
+        if containers or bls:
+            parts = []
+            if bls:
+                parts.append("BL numbers: " + ", ".join(bls))
+            if containers:
+                parts.append("container numbers: " + ", ".join(containers))
+            agent_message = (
+                f"{message_text}\n\n"
+                f"[SYSTEM: Extracted {'; '.join(parts)}. "
+                f"Shipments have been added and are pending approval. "
+                f"Tell the user the shipment has been added and ask if they would like to approve it to begin tracking. Do not ask for container numbers.]"
+            )
+
         # --- Run the agent -----------------------------------------------------
         logger.info("WhatsApp message from user %s (phone ...%s)", user.id, sender_phone[-4:])
-        reply = await run_agent(str(user.id), message_text, db)
+        reply = await run_agent(str(user.id), agent_message, db)
 
         if reply is None:
             return _make_reply(sender_phone, FALLBACK_MESSAGE)

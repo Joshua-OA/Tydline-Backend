@@ -98,8 +98,6 @@ async def process_inbound_email(
     Postmark inbound fields used:
       From, FromName, To, Subject, TextBody, HtmlBody, MessageID, Headers
     """
-    from app.observability.langfuse import create_trace
-
     from_email = (payload.get("From") or "").strip().lower()
     to_email = (payload.get("To") or "").strip()
     subject = (payload.get("Subject") or "").strip()
@@ -108,12 +106,6 @@ async def process_inbound_email(
     message_id = (payload.get("MessageID") or "").strip() or None
     from_name = (payload.get("FromName") or "").strip() or None
     raw_headers = payload.get("Headers")
-
-    trace = create_trace(
-        name="inbound_email_received",
-        metadata={"from": from_email, "subject": subject, "message_id": message_id},
-        tags=["email", "inbound"],
-    )
 
     # ------------------------------------------------------------------
     # 1. Deduplicate by MessageID
@@ -132,17 +124,6 @@ async def process_inbound_email(
     #    Primary:  to_email  → users.tracking_email  (company's tracking address)
     #    Fallback: from_email → users.email           (legacy / direct sender match)
     # ------------------------------------------------------------------
-    span_user = None
-    if trace:
-        try:
-            span_user = trace.start_observation(
-                name="user_lookup",
-                as_type="span",
-                input={"from_email": from_email, "to_email": to_email},
-            )
-        except Exception:
-            pass
-
     user: User | None = None
     match_method: str = "none"
 
@@ -169,29 +150,11 @@ async def process_inbound_email(
             match_method = "from_email"
             logger.info("Inbound email matched user %s via from_email <%s>", user.id, from_email)
 
-    if span_user:
-        try:
-            span_user.update(output={
-                "user_id": str(user.id) if user else None,
-                "matched": user is not None,
-                "match_method": match_method,
-            })
-            span_user.end()
-        except Exception:
-            pass
-
     # ------------------------------------------------------------------
     # 3. AI extraction of containers, BL numbers, carrier, and summary
     #    Falls back to regex if Groq is not configured or the call fails.
     # ------------------------------------------------------------------
     from app.services.ai import extract_email_shipment_data
-
-    span_extract = None
-    if trace:
-        try:
-            span_extract = trace.start_observation(name="ai_extraction", as_type="span")
-        except Exception:
-            pass
 
     carrier: str | None = None
     email_summary: str | None = None
@@ -207,30 +170,11 @@ async def process_inbound_email(
         container_numbers, bl_numbers = _regex_extract(subject, body_text)
         logger.info("Regex fallback — containers: %s, BLs: %s", container_numbers, bl_numbers)
 
-    if span_extract:
-        try:
-            span_extract.update(output={
-                "containers": container_numbers,
-                "bl_numbers": bl_numbers,
-                "carrier": carrier,
-                "method": "ai" if ai_result else "regex",
-            })
-            span_extract.end()
-        except Exception:
-            pass
-
     # ------------------------------------------------------------------
     # 4. Link containers to the user's shipments (by container number or BL)
     # ------------------------------------------------------------------
     matched_shipment_ids: list[str] = []
     if user and (container_numbers or bl_numbers):
-        span_link = None
-        if trace:
-            try:
-                span_link = trace.start_observation(name="shipment_linking", as_type="span")
-            except Exception:
-                pass
-
         filters = []
         if container_numbers:
             filters.append(Shipment.container_number.in_(container_numbers))
@@ -241,17 +185,30 @@ async def process_inbound_email(
         result = await session.execute(
             select(Shipment).where(Shipment.user_id == user.id, or_(*filters))
         )
-        shipments = result.scalars().all()
+        shipments = list(result.scalars().all())
         matched_shipment_ids = [str(s.id) for s in shipments]
         if matched_shipment_ids:
-            logger.info("Email matched shipments: %s", matched_shipment_ids)
+            logger.info("Email matched existing shipments: %s", matched_shipment_ids)
 
-        if span_link:
-            try:
-                span_link.update(output={"matched": matched_shipment_ids})
-                span_link.end()
-            except Exception:
-                pass
+        # Create shipments for containers not yet tracked
+        existing_containers = {s.container_number for s in shipments}
+        new_containers = [c for c in container_numbers if c not in existing_containers]
+        new_shipment_ids: list[str] = []
+        for container in new_containers:
+            new_shipment = Shipment(
+                container_number=container,
+                bill_of_lading=bl_numbers[0] if bl_numbers else None,
+                carrier=carrier,
+                user_id=user.id,
+                status="pending_approval",
+            )
+            session.add(new_shipment)
+            await session.flush()
+            new_shipment_ids.append(str(new_shipment.id))
+            logger.info("Created shipment %s (pending_approval) for container %s from inbound email", new_shipment.id, container)
+
+        if new_shipment_ids:
+            matched_shipment_ids.extend(new_shipment_ids)
 
     # ------------------------------------------------------------------
     # 5. Persist InboundEmail record — each extracted field in its own column
@@ -280,13 +237,6 @@ async def process_inbound_email(
     # 6. Feed into Mem0 so the agent can reference emails in conversation
     # ------------------------------------------------------------------
     if user:
-        span_mem0 = None
-        if trace:
-            try:
-                span_mem0 = trace.start_observation(name="mem0_store", as_type="span")
-            except Exception:
-                pass
-
         context = _build_mem0_messages(record, bl_numbers, carrier, email_summary)
         try:
             await add_memory(
@@ -304,13 +254,6 @@ async def process_inbound_email(
             logger.info("Mem0 updated for user %s from email %s", user.id, record.id)
         except Exception:
             logger.warning("Mem0 update failed for email %s — continuing", record.id)
-
-        if span_mem0:
-            try:
-                span_mem0.update(output={"stored": record.mem0_stored})
-                span_mem0.end()
-            except Exception:
-                pass
 
     await session.commit()
     await session.refresh(record)

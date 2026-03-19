@@ -3,8 +3,6 @@ AI-powered services using Groq:
 - draft_logistics_alert: turn shipment/risk context into a human-readable alert
 - extract_email_shipment_data: parse an inbound email and return structured
   container numbers, BL numbers, carrier, and a short summary
-
-Every call is traced in Langfuse when configured.
 """
 
 import json
@@ -51,25 +49,6 @@ async def extract_email_shipment_data(
 
     messages = [{"role": "user", "content": prompt}]
 
-    from app.observability.langfuse import create_trace
-
-    trace = create_trace(
-        name="email_extraction",
-        metadata={"subject": subject[:120]},
-        tags=["llm", "email", "extraction"],
-    )
-    generation = None
-    if trace is not None:
-        try:
-            generation = trace.start_observation(
-                name="groq_email_extraction",
-                as_type="generation",
-                model=settings.groq_model,
-                input=messages,
-            )
-        except Exception:
-            pass
-
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
@@ -90,40 +69,13 @@ async def extract_email_shipment_data(
             data = resp.json()
     except httpx.HTTPError as e:
         logger.warning("groq extract_email_shipment_data failed: %s", e)
-        if generation is not None:
-            try:
-                generation.update(output=None, level="ERROR", status_message=str(e))
-                generation.end()
-            except Exception:
-                pass
         return None
 
     try:
         content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
-        usage = data.get("usage", {})
-        if generation is not None:
-            try:
-                generation.update(
-                    output=parsed,
-                    usage_details={
-                        "input": usage.get("prompt_tokens") or 0,
-                        "output": usage.get("completion_tokens") or 0,
-                        "total": usage.get("total_tokens") or 0,
-                    },
-                )
-                generation.end()
-            except Exception:
-                pass
-        return parsed
+        return json.loads(content)
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
         logger.warning("groq email extraction response parse failed: %s", e)
-        if generation is not None:
-            try:
-                generation.update(output=None, level="ERROR", status_message=str(e))
-                generation.end()
-            except Exception:
-                pass
         return None
 
 
@@ -155,27 +107,6 @@ Write a short, clear alert (2-4 sentences) explaining the situation and what the
 
     messages = [{"role": "user", "content": prompt}]
 
-    # --- Langfuse: open trace + generation ---
-    from app.observability.langfuse import create_trace
-
-    trace = create_trace(
-        name="draft_logistics_alert",
-        metadata={"container_number": container, "risk_level": risk},
-        tags=["llm", "alert"],
-    )
-    generation = None
-    if trace is not None:
-        try:
-            generation = trace.start_observation(
-                name="groq_logistics_alert",
-                as_type="generation",
-                model=settings.groq_model,
-                input=messages,
-            )
-        except Exception:
-            pass
-
-    # --- Groq call ---
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
@@ -195,37 +126,10 @@ Write a short, clear alert (2-4 sentences) explaining the situation and what the
             data = resp.json()
     except httpx.HTTPError as e:
         logger.warning("groq draft_logistics_alert failed: %s", e)
-        if generation is not None:
-            try:
-                generation.update(output=None, level="ERROR", status_message=str(e))
-                generation.end()
-            except Exception:
-                pass
         return None
 
-    # --- Parse response ---
     try:
         content = data["choices"][0]["message"]["content"]
-        usage = data.get("usage", {})
-        if generation is not None:
-            try:
-                generation.update(
-                    output=content,
-                    usage_details={
-                        "input": usage.get("prompt_tokens") or 0,
-                        "output": usage.get("completion_tokens") or 0,
-                        "total": usage.get("total_tokens") or 0,
-                    },
-                )
-                generation.end()
-            except Exception:
-                pass
         return content.strip() if content else None
     except (KeyError, IndexError, TypeError):
-        if generation is not None:
-            try:
-                generation.update(output=None, level="ERROR", status_message="unexpected response shape")
-                generation.end()
-            except Exception:
-                pass
         return None

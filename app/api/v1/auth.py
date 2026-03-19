@@ -6,10 +6,13 @@ GET  /api/v1/auth/verify        — exchange token for HttpOnly session cookie
 POST /api/v1/auth/logout        — clear the session cookie
 """
 
+import base64
+import json
 import logging
+from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +36,7 @@ _COOKIE_MAX_AGE = 60 * 60 * 24 * 7  # 7 days
 class RequestLinkBody(BaseModel):
     email: EmailStr
     company_name: str
+    metadata: dict | None = None
 
 
 @router.post("/request-link", status_code=status.HTTP_200_OK)
@@ -53,15 +57,35 @@ async def request_magic_link(payload: RequestLinkBody, db: DbSessionDep) -> dict
 
     link = await generate_magic_link(user, db)
 
-    body = (
+    if payload.metadata:
+        state = base64.urlsafe_b64encode(
+            json.dumps(payload.metadata, separators=(",", ":")).encode()
+        ).decode()
+        link = f"{link}&state={state}"
+
+    text_body = (
         f"Hi,\n\n"
         f"Click the link below to sign in to Tydline. "
-        f"This link expires in 30 minutes.\n\n"
+        f"This link expires in 15 minutes.\n\n"
         f"{link}\n\n"
         f"If you did not request this, you can safely ignore this email.\n\n"
         f"— The Tydline Team"
     )
-    await send_email(to=payload.email, subject="Your Tydline sign-in link", text_body=body)
+
+    html_body: str | None = None
+    template_path = Path(__file__).parents[3] / "emails" / "magic-link.html"
+    try:
+        html_body = template_path.read_text(encoding="utf-8")
+        html_body = html_body.replace("{{email}}", payload.email).replace("{{magic_link}}", link)
+    except Exception:
+        logger.warning("Could not load magic-link email template from %s", template_path)
+
+    await send_email(
+        to=payload.email,
+        subject="Your Tydline sign-in link",
+        text_body=text_body,
+        html_body=html_body,
+    )
 
     return {"message": "Check your email"}
 
@@ -71,14 +95,27 @@ async def verify_token(
     response: Response,
     token: Annotated[str, Query(...)],
     db: DbSessionDep,
+    tydline_auth: Annotated[str | None, Cookie()] = None,
 ) -> dict:
     """
     Exchange a magic-link token for a session cookie.
     Sets an HttpOnly cookie — frontend receives user_id + subscription_status
     but never sees the raw auth_token value.
     """
+    from app.services.auth import get_user_by_auth_token
+
     user = await verify_magic_link(token, db)
+
     if user is None:
+        # Token already consumed — check if this session is already authenticated
+        # (handles double-invocation from React StrictMode / duplicate requests)
+        if tydline_auth:
+            existing = await get_user_by_auth_token(tydline_auth, db)
+            if existing:
+                return {
+                    "user_id": str(existing.id),
+                    "subscription_status": existing.subscription_status,
+                }
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
     response.set_cookie(

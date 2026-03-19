@@ -131,6 +131,33 @@ def get_plan(plan_key: str | None) -> PlanDefinition | None:
     return PLANS.get(plan_key)
 
 
+_TEST_TRACKING_EMAILS = {"leleimports@track.tydline.com"}
+
+
+def is_test_account(user) -> bool:
+    """Return True for internal test accounts that bypass all plan/feature gates."""
+    return bool(user.tracking_email and user.tracking_email.lower() in _TEST_TRACKING_EMAILS)
+
+
+def get_test_features() -> PlanFeatures:
+    """Full-access feature set granted to test accounts."""
+    return PlanFeatures(
+        email_notifications=True,
+        whatsapp_notifications=True,
+        erp_integration=True,
+        multi_channel=True,
+        shipment_limit=None,
+        eta_alerts=True,
+        eta_change_alerts=True,
+        basic_delay_alerts=True,
+        custom_alert_rules=True,
+        all_alert_types=True,
+        multi_user_access=True,
+        priority_support=True,
+        dedicated_account_manager=True,
+    )
+
+
 def get_user_features(plan_key: str | None, subscription_status: str) -> PlanFeatures | None:
     """
     Return feature flags for a user.

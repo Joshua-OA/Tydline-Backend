@@ -51,7 +51,10 @@ def _build_agent():
             instructions=(
                 "You are Tydline's logistics assistant. You help importers track containers and avoid demurrage. "
                 "Use the tools to look up the user's shipments and container status when needed. "
-                "Be concise and actionable. If you don't have data, say so and suggest they add a container or try again later."
+                "Be concise and actionable. If you don't have data, say so and suggest they add a container or try again later. "
+                "IMPORTANT: If the user's message includes extracted BL or container numbers (shown as [EXTRACTED: ...]), "
+                "acknowledge them immediately and confirm that tracking has begun. "
+                "Never ask the user to provide container numbers if BL numbers or containers were already extracted from their message."
             ),
         )
 

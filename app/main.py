@@ -38,6 +38,11 @@ async def _log_raw_request(request: Request) -> None:
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown lifecycle."""
     configure_logfire()
+    try:
+        import logfire
+        logfire.instrument_fastapi(app, capture_headers=False)
+    except Exception:
+        pass
     yield
 
 
@@ -93,7 +98,7 @@ def create_app() -> FastAPI:
     async def health_check() -> dict[str, str]:
         """
         Basic health probe for Cloud Run / monitoring.
-        Checks DB connectivity, ShipsGo, Groq, and Langfuse.
+        Checks DB connectivity, ShipsGo, and Groq.
         """
         db_status = "unknown"
         shipsgo_status = "unknown"

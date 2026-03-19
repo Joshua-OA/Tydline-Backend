@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     api_key: str | None = None
 
     # Frontend URL (used in magic link emails)
-    frontend_url: str = "http://localhost:3000"
+    frontend_url: str = "http://localhost:5173"
 
     # Moolre MoMo payment integration
     moolre_webhook_secret: str | None = None
