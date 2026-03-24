@@ -18,7 +18,7 @@ class User(Base):
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     company_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tracking_email: Mapped[str | None] = mapped_column(String(255), unique=True, index=True, nullable=True)
-    subscription_status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    subscription_status: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
     magic_link_token: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     auth_token: Mapped[str | None] = mapped_column(String(255), unique=True, index=True, nullable=True)
@@ -268,3 +268,30 @@ class UserAuthorizedEmail(Base):
     )
 
     user: Mapped["User"] = relationship(back_populates="authorized_emails")
+
+
+class Coupon(Base):
+    """
+    A coupon code that activates a plan without payment.
+
+    plan: which plan the coupon grants (starter | growth | pro | custom)
+    max_uses: None means unlimited
+    uses_count: incremented each time the coupon is successfully redeemed
+    is_active: admin can deactivate a coupon without deleting it
+    expires_at: None means never expires
+    """
+
+    __tablename__ = "coupons"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    code: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    plan: Mapped[str] = mapped_column(String(32), nullable=False)
+    is_active: Mapped[bool] = mapped_column(nullable=False, default=True)
+    max_uses: Mapped[int | None] = mapped_column(nullable=True)
+    uses_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

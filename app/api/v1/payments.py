@@ -15,10 +15,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import select
+
 from app.api.deps import require_auth_token
 from app.core.plans import PURCHASABLE_PLANS, get_plan
 from app.db.session import get_db
-from app.models.orm import User
+from app.models.orm import Coupon, User
 from app.services import moolre
 from app.services.email import send_email
 
@@ -194,4 +196,47 @@ async def confirm_payment(
         html_body=html_receipt,
     )
 
+    return {"status": "active", "plan": current_user.plan}
+
+
+class ApplyCouponBody(BaseModel):
+    code: str
+
+
+@router.post("/apply-coupon", status_code=status.HTTP_200_OK)
+async def apply_coupon(
+    payload: ApplyCouponBody,
+    db: DbSessionDep,
+    current_user: CurrentUserDep,
+) -> dict:
+    """
+    Redeem a coupon code to activate a plan without going through payment.
+    """
+    from datetime import timezone as tz
+
+    result = await db.execute(
+        select(Coupon).where(Coupon.code == payload.code.strip().upper())
+    )
+    coupon = result.scalar_one_or_none()
+
+    if coupon is None or not coupon.is_active:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invalid coupon code")
+
+    if coupon.expires_at and coupon.expires_at < datetime.now(tz=tz.utc):
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="Coupon has expired")
+
+    if coupon.max_uses is not None and coupon.uses_count >= coupon.max_uses:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="Coupon usage limit reached")
+
+    coupon.uses_count += 1
+    current_user.subscription_status = "active"
+    current_user.plan = coupon.plan
+    current_user.payment_session_id = None
+    current_user.payment_reference = None
+    current_user.payment_pending_plan = None
+    db.add(coupon)
+    db.add(current_user)
+    await db.commit()
+
+    logger.info("Coupon %s redeemed by user %s — plan: %s", coupon.code, current_user.id, coupon.plan)
     return {"status": "active", "plan": current_user.plan}

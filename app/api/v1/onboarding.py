@@ -61,7 +61,14 @@ async def set_tracking_email(
     """
     Set the company's inbound tracking email address.
     The address must be in the form *@track.tydline.com and must be unique.
+    Requires an active subscription.
     """
+    if current_user.subscription_status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="An active subscription is required to set a tracking email",
+        )
+
     normalised = payload.tracking_email.strip().lower()
     if not normalised.endswith(_TRACKING_DOMAIN):
         raise HTTPException(
