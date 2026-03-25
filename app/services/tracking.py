@@ -16,6 +16,7 @@ The shipment_id is cached in memory so subsequent polls skip Step 1.
 Falls back to a generic tracking provider if ShipsGo is not configured.
 """
 
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -25,6 +26,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import logging
+
+_CONTAINER_RE = re.compile(r"^[A-Z]{4}\d{7}$")
 
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal
@@ -72,14 +75,15 @@ def _fallback_headers() -> dict[str, str]:
 
 async def _register_container(container_number: str) -> str | None:
     """
-    Step 1 — POST /ocean/shipments to register a container.
+    Step 1 — POST /ocean/shipments to register a container or booking/BL reference.
     Returns the ShipsGo shipment_id string, or None on failure.
 
-    The API is idempotent: submitting an already-registered container
-    returns the existing resource rather than creating a duplicate.
+    ShipsGo accepts either container_number (ISO 6346: XXXX1234567) or booking_number.
+    The API is idempotent: submitting an already-registered reference returns the existing resource.
     """
     url = f"{_shipsgo_base()}/ocean/shipments"
-    payload = {"container_number": container_number}
+    is_container = bool(_CONTAINER_RE.match(container_number.strip().upper()))
+    payload = {"container_number": container_number} if is_container else {"booking_number": container_number}
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
