@@ -64,9 +64,12 @@ async def run_tracker_cycle() -> None:
         succeeded = failed = skipped = 0
         for shipment in shipments:
             try:
-                tracking_data = await fetch_container_tracking_data(
-                    shipment.container_number
-                )
+                reference = shipment.container_number or shipment.bill_of_lading
+                if not reference:
+                    skipped += 1
+                    continue
+
+                tracking_data = await fetch_container_tracking_data(reference)
                 if not tracking_data:
                     skipped += 1
                     continue

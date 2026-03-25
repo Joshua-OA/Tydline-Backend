@@ -380,7 +380,11 @@ async def initial_track_shipment(shipment_id: uuid.UUID) -> None:
         if not shipment:
             return
 
-        tracking_data = await fetch_container_tracking_data(shipment.container_number)
+        reference = shipment.container_number or shipment.bill_of_lading
+        if not reference:
+            return
+
+        tracking_data = await fetch_container_tracking_data(reference)
         if not tracking_data:
             return
 
@@ -400,9 +404,11 @@ async def refresh_all_active_shipments() -> None:
         shipments = result.scalars().all()
 
         for shipment in shipments:
-            tracking_data = await fetch_container_tracking_data(
-                shipment.container_number
-            )
+            reference = shipment.container_number or shipment.bill_of_lading
+            if not reference:
+                continue
+
+            tracking_data = await fetch_container_tracking_data(reference)
             if not tracking_data:
                 continue
 

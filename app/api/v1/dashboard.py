@@ -148,13 +148,13 @@ async def list_approvals(
 @router.post("/shipments/submit", response_model=ShipmentSubmitResponse, status_code=status.HTTP_201_CREATED)
 async def submit_shipment(
     payload: ShipmentSubmit,
+    background_tasks: BackgroundTasks,
     db: DbSessionDep,
     current_user: CurrentUserDep,
 ) -> ShipmentSubmitResponse:
     """
     Submit a shipment for tracking.
-    Creates it with pending_approval status — tracking begins after 3 days
-    or immediately on manual approval.
+    Creates it with tracking_started status and immediately kicks off tracking.
     """
     existing = await db.execute(
         select(Shipment).where(
@@ -173,11 +173,12 @@ async def submit_shipment(
         bill_of_lading=payload.bill_of_lading,
         carrier=payload.carrier,
         user_id=current_user.id,
-        status="pending_approval",
+        status="tracking_started",
     )
     db.add(shipment)
     await db.commit()
     await db.refresh(shipment)
+    background_tasks.add_task(initial_track_shipment, shipment.id)
     return ShipmentSubmitResponse(id=shipment.id, status=shipment.status)
 
 
