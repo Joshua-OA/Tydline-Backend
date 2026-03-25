@@ -65,6 +65,7 @@ class Shipment(Base):
     demurrage_risk: Mapped[str | None] = mapped_column(String(16), nullable=True)
     free_days_remaining: Mapped[int | None] = mapped_column(nullable=True)
     timeline_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    notify_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )

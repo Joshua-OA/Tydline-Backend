@@ -86,6 +86,10 @@ class ShipmentSubmitResponse(BaseModel):
     status: str
 
 
+class NotifyMeRequest(BaseModel):
+    email: str
+
+
 async def _get_user_shipments(user: User, db: AsyncSession) -> list[Shipment]:
     result = await db.execute(
         select(Shipment)
@@ -180,6 +184,32 @@ async def submit_shipment(
     await db.refresh(shipment)
     background_tasks.add_task(initial_track_shipment, shipment.id)
     return ShipmentSubmitResponse(id=shipment.id, status=shipment.status)
+
+
+@router.post("/shipments/{shipment_id}/notify-me", status_code=status.HTTP_200_OK)
+async def notify_me_when_ready(
+    shipment_id: uuid.UUID,
+    payload: NotifyMeRequest,
+    db: DbSessionDep,
+    current_user: CurrentUserDep,
+) -> dict:
+    """
+    Save an email address to notify when tracking data becomes available for this shipment.
+    """
+    result = await db.execute(
+        select(Shipment).where(
+            Shipment.id == shipment_id,
+            Shipment.user_id == current_user.id,
+        )
+    )
+    shipment = result.scalar_one_or_none()
+    if shipment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shipment not found")
+
+    shipment.notify_email = payload.email.strip()
+    db.add(shipment)
+    await db.commit()
+    return {"status": "saved"}
 
 
 @router.post("/approvals/{shipment_id}/approve", response_model=ShipmentRead)

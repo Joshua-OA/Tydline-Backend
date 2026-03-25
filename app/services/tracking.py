@@ -469,8 +469,31 @@ async def _apply_tracking_update(
 
     raw_tracking = tracking_data.pop("_raw", {})
 
+    # Fire notify-me email if someone subscribed and real data has arrived
+    notify_email = shipment.notify_email
+    has_real_data = bool(vessel or origin or destination or eta_raw)
+    if notify_email and has_real_data:
+        shipment.notify_email = None
+
     await session.commit()
     await session.refresh(shipment)
+
+    if notify_email and has_real_data:
+        from app.services.email import send_email
+        reference = shipment.container_number or shipment.bill_of_lading or ""
+        await send_email(
+            to=notify_email,
+            subject=f"Your shipment {reference} is now being tracked",
+            text_body=(
+                f"Good news! We've picked up live tracking data for {reference}.\n\n"
+                f"Status: {shipment.status or 'In progress'}\n"
+                f"Vessel: {shipment.vessel or 'Not yet available'}\n"
+                f"Origin: {shipment.origin or 'Not yet available'}\n"
+                f"Destination: {shipment.destination or 'Not yet available'}\n"
+                f"ETA: {shipment.eta.strftime('%d %b %Y') if shipment.eta else 'Not yet available'}\n\n"
+                "Log in to your Tydline dashboard to see the full details."
+            ),
+        )
 
     await persist_timeline_and_risk(
         session=session,
