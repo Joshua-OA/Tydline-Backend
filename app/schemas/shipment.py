@@ -39,7 +39,7 @@ class ShipmentCreate(BaseModel):
 
 class ShipmentRead(BaseModel):
     id: uuid.UUID
-    container_number: str
+    container_number: str | None
     bill_of_lading: str | None
     carrier: str | None
     status: str

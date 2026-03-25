@@ -14,192 +14,59 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models import orm
 from app.services.ai import draft_logistics_alert
-from app.utils.retry import with_retries
+from app.utils.retry import with_retries  # still used by _send_whatsapp / _send_sms
 
 logger = logging.getLogger(__name__)
 
 
 async def _send_email(recipient_email: str, subject: str, body: str) -> None:
-    """
-    Send an email using Postmark.
+    from app.services.email import send_email
+    await send_email(to=recipient_email, subject=subject, text_body=body)
 
-    This uses the Postmark server token configured in environment variables.
+
+async def _send_whatsapp(phone_number: str, message: str) -> None:
     """
-    if not (settings.postmark_server_token and settings.email_from):
-        # In production, log that email could not be sent due to missing config
+    Push a text message via the external WhatsApp proxy (async push path).
+
+    Proxy endpoint: POST {WHATSAPP_PROXY_BASE_URL}/whatsapp/external/send
+    Auth header:    X-Webhook-Secret: {WHATSAPP_WEBHOOK_SECRET}
+
+    Payload:
+        {
+            "to": "<phone without +>",
+            "message": { "type": "text", "content": "<body>" }
+        }
+    """
+    if not (settings.whatsapp_proxy_url and settings.whatsapp_webhook_secret):
+        logger.debug("WhatsApp proxy not configured — skipping outbound message")
         return
 
-    from app.observability.langfuse import create_trace
+    send_url = settings.whatsapp_proxy_url
+    phone = phone_number.lstrip("+")
+    phone_suffix = phone[-4:] if len(phone) >= 4 else "****"
 
-    trace = create_trace(
-        name="email_notification_sent",
-        metadata={"subject": subject},
-        tags=["notification", "email"],
-    )
-    span = None
-    if trace is not None:
-        try:
-            span = trace.start_observation(
-                name="postmark_send_email",
-                as_type="span",
-                input={"recipient": recipient_email, "subject": subject},
-            )
-        except Exception:
-            pass
-
-    payload = {
-        "From": settings.email_from,
-        "To": recipient_email,
-        "Subject": subject,
-        "TextBody": body,
+    payload: dict[str, Any] = {
+        "to": phone,
+        "message": {
+            "type": "text",
+            "content": message[:4096],
+        },
     }
 
     async def _post() -> httpx.Response:
         async with httpx.AsyncClient(timeout=10.0) as client:
             return await client.post(
-                "https://api.postmarkapp.com/email",
+                send_url,
                 headers={
-                    "X-Postmark-Server-Token": settings.postmark_server_token,
-                    "Accept": "application/json",
+                    "X-Webhook-Secret": settings.whatsapp_webhook_secret,
                     "Content-Type": "application/json",
                 },
                 json=payload,
             )
 
     resp = await with_retries(_post)
-    success = resp is not None and resp.is_success
-    if not success:
-        logger.warning("postmark send_email failed or retries exhausted")
-    if span is not None:
-        try:
-            if success:
-                span.update(output={"status": "sent"})
-            else:
-                span.update(output={"status": "failed"}, level="ERROR", status_message="postmark send failed")
-            span.end()
-        except Exception:
-            pass
-
-
-async def _send_whatsapp(phone_number: str, message: str) -> None:
-    """
-    Send a text message via the WhatsApp proxy server.
-
-    Posts to the proxy using the same payload format it expects, authenticated
-    with WHATSAPP_WEBHOOK_SECRET.  Falls back to Meta's API directly if the
-    proxy URL is not configured.
-    """
-    # --- Proxy path (preferred) -------------------------------------------
-    if settings.whatsapp_proxy_url and settings.whatsapp_webhook_secret:
-        from app.observability.langfuse import create_trace
-
-        trace = create_trace(
-            name="whatsapp_notification_sent",
-            metadata={"phone_suffix": phone_number[-4:] if len(phone_number) >= 4 else "****"},
-            tags=["notification", "whatsapp"],
-        )
-        span = None
-        if trace is not None:
-            try:
-                span = trace.start_observation(
-                    name="whatsapp_send_message",
-                    as_type="span",
-                    input={"phone_suffix": phone_number[-4:] if len(phone_number) >= 4 else "****"},
-                )
-            except Exception:
-                pass
-
-        payload: dict[str, Any] = {
-            "to": phone_number.lstrip("+"),
-            "message": {
-                "type": "text",
-                "content": message[:4096],
-            },
-        }
-
-        async def _post_proxy() -> httpx.Response:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                return await client.post(
-                    settings.whatsapp_proxy_url,
-                    headers={
-                        "X-Webhook-Secret": settings.whatsapp_webhook_secret,
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-
-        resp = await with_retries(_post_proxy)
-        success = resp is not None and resp.is_success
-        if not success:
-            logger.warning("whatsapp proxy send failed or retries exhausted")
-        if span is not None:
-            try:
-                if success:
-                    span.update(output={"status": "sent"})
-                else:
-                    span.update(output={"status": "failed"}, level="ERROR", status_message="whatsapp proxy send failed")
-                span.end()
-            except Exception:
-                pass
-        return
-
-    # --- Direct Meta API fallback -----------------------------------------
-    _placeholder = ("your-", "your_")
-    if not (settings.whatsapp_access_token and settings.whatsapp_phone_number_id):
-        return
-    if any(settings.whatsapp_access_token.startswith(p) for p in _placeholder):
-        return
-
-    from app.observability.langfuse import create_trace
-
-    trace = create_trace(
-        name="whatsapp_notification_sent",
-        metadata={"phone_suffix": phone_number[-4:] if len(phone_number) >= 4 else "****"},
-        tags=["notification", "whatsapp"],
-    )
-    span = None
-    if trace is not None:
-        try:
-            span = trace.start_observation(
-                name="whatsapp_send_message",
-                as_type="span",
-                input={"phone_suffix": phone_number[-4:] if len(phone_number) >= 4 else "****"},
-            )
-        except Exception:
-            pass
-
-    url = f"https://graph.facebook.com/v19.0/{settings.whatsapp_phone_number_id}/messages"
-    meta_payload: dict[str, Any] = {
-        "messaging_product": "whatsapp",
-        "to": phone_number.lstrip("+"),
-        "type": "text",
-        "text": {"body": message[:4096]},
-    }
-
-    async def _post() -> httpx.Response:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            return await client.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {settings.whatsapp_access_token}",
-                    "Content-Type": "application/json",
-                },
-                json=meta_payload,
-            )
-
-    resp = await with_retries(_post)
-    success = resp is not None and resp.is_success
-    if not success:
-        logger.warning("whatsapp send failed or retries exhausted")
-    if span is not None:
-        try:
-            if success:
-                span.update(output={"status": "sent"})
-            else:
-                span.update(output={"status": "failed"}, level="ERROR", status_message="whatsapp send failed")
-            span.end()
-        except Exception:
-            pass
+    if resp is None or not resp.is_success:
+        logger.warning("WhatsApp proxy push failed or retries exhausted (to ...%s)", phone_suffix)
 
 
 async def _send_sms(phone_number: str, message: str) -> None:
@@ -224,30 +91,10 @@ async def send_shipment_update_notification(
     High-level notification used when shipment status changes.
     Persists Notification record and dispatches via available channels.
     """
-    from app.observability.langfuse import create_trace
-
-    create_trace(
-        name="container_status_updated",
-        metadata={
-            "container_number": shipment.container_number,
-            "old_status": old_status,
-            "new_status": new_status,
-        },
-        tags=["shipment", "status_change"],
-    )
-
     user = shipment.user
-
-    message = (
-        f"Container {shipment.container_number} status changed from "
-        f"{old_status} to {new_status}."
-    )
-
-    # Example of additional intelligence for demurrage risk messaging.
+    message = f"Container {shipment.container_number} status changed from {old_status} to {new_status}."
     if new_status.lower() == "arrived at port":
-        message += (
-            " Recommended action: Begin customs clearance to avoid demurrage fees."
-        )
+        message += " Recommended action: Begin customs clearance to avoid demurrage fees."
 
     notification = orm.Notification(
         shipment_id=shipment.id,
@@ -293,18 +140,6 @@ async def send_shipment_status_change_notification(
     otherwise falls back to template. Persists to notifications and optionally
     to ai_generated_messages; sends via email and WhatsApp.
     """
-    from app.observability.langfuse import create_trace
-
-    create_trace(
-        name="notification_sent",
-        metadata={
-            "container_number": shipment.container_number,
-            "old_status": old_status,
-            "new_status": new_status,
-        },
-        tags=["shipment", "notification"],
-    )
-
     user = shipment.user
 
     # Fallback template

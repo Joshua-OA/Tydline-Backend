@@ -284,40 +284,7 @@ async def fetch_container_tracking_data(container_number: str) -> dict[str, Any]
     Falls back to a generic provider if ShipsGo is not configured.
     Returns a normalized dict: container_number, status, location, eta, vessel.
     """
-    from app.observability.langfuse import create_trace
-
-    trace = create_trace(
-        name="container_tracking_started",
-        metadata={"container_number": container_number},
-        tags=["shipsgo", "tracking"],
-    )
-    span = None
-    if trace is not None:
-        try:
-            span = trace.start_observation(
-                name="shipsgo_container_lookup",
-                as_type="span",
-                input={"container_number": container_number},
-            )
-        except Exception:
-            pass
-
-    result = await _do_fetch(container_number)
-
-    if span is not None:
-        try:
-            if result:
-                span.update(output={
-                    "status": result.get("status"),
-                    "location": result.get("location"),
-                })
-            else:
-                span.update(output={"error": "no data returned"}, level="WARNING")
-            span.end()
-        except Exception:
-            pass
-
-    return result
+    return await _do_fetch(container_number)
 
 
 async def _do_fetch(container_number: str) -> dict[str, Any]:
@@ -401,21 +368,10 @@ async def initial_track_shipment(shipment_id: uuid.UUID) -> None:
     Called when a shipment is first created to perform an initial tracking lookup.
     Uses its own DB session so it can run independently of request lifecycle.
     """
-    from app.observability.langfuse import create_trace, flush
-
     async with AsyncSessionLocal() as session:
         shipment = await _get_shipment_or_none(session, shipment_id)
         if not shipment:
             return
-
-        create_trace(
-            name="shipment_registered",
-            metadata={
-                "shipment_id": str(shipment_id),
-                "container_number": shipment.container_number,
-            },
-            tags=["shipment", "onboarding"],
-        )
 
         tracking_data = await fetch_container_tracking_data(shipment.container_number)
         if not tracking_data:
@@ -423,15 +379,11 @@ async def initial_track_shipment(shipment_id: uuid.UUID) -> None:
 
         await _apply_tracking_update(session, shipment, tracking_data)
 
-    flush()
-
 
 async def refresh_all_active_shipments() -> None:
     """
     Used by the background worker to refresh all in-progress shipments.
     """
-    from app.observability.langfuse import flush
-
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(orm.Shipment).where(
@@ -448,8 +400,6 @@ async def refresh_all_active_shipments() -> None:
                 continue
 
             await _apply_tracking_update(session, shipment, tracking_data)
-
-    flush()
 
 
 async def _get_shipment_or_none(

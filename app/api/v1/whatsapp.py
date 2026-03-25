@@ -1,9 +1,23 @@
 """
-WhatsApp inbound webhook — receives forwarded payloads from the external
-proxy server, runs the logistics agent, and returns the reply.
+WhatsApp inbound webhook.
+
+Inbound flow (Meta → Proxy → This server):
+  The proxy forwards the raw Meta webhook payload to POST /api/v1/whatsapp/webhook
+  with an added header:  X-Webhook-Secret: {WHATSAPP_WEBHOOK_SECRET}
+
+  We run the logistics agent and return a synchronous reply:
+  { "to": "<phone>", "message": { "type": "text", "content": "<reply>" } }
+
+  If "to" / "message" are omitted the proxy treats the response as "no reply".
+
+Outbound flow (async push) is handled by the notification service via
+POST {WHATSAPP_PROXY_BASE_URL}/whatsapp/external/send with the same secret.
 """
 
 import logging
+import re
+import time
+import uuid as _uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -14,9 +28,84 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.logistics import run_agent
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.orm import User
+from app.models.orm import Shipment, User, UserWhatsAppPhone
+
+async def _extract_and_create_shipments(
+    text: str, user: User, db: AsyncSession
+) -> tuple[list[str], list[str]]:
+    """
+    Use AI to extract container and BL numbers from *text*, create any new
+    shipments, and return (container_numbers, bl_numbers).
+    """
+    from app.services.ai import extract_email_shipment_data
+
+    result = await extract_email_shipment_data(subject="", body=text)
+    if not result:
+        return [], []
+
+    containers = [c.upper() for c in (result.get("container_numbers") or [])]
+    bls = [b.upper() for b in (result.get("bl_numbers") or [])]
+    carrier = result.get("carrier") or None
+
+    if not containers and not bls:
+        return [], []
+
+    # Find existing shipments to avoid duplicates
+    from sqlalchemy import or_
+    filters = []
+    if containers:
+        filters.append(Shipment.container_number.in_(containers))
+    if bls:
+        filters.append(Shipment.bill_of_lading.in_(bls))
+
+    existing = (await db.execute(
+        select(Shipment).where(Shipment.user_id == user.id, or_(*filters))
+    )).scalars().all()
+
+    existing_containers = {s.container_number for s in existing if s.container_number}
+    existing_bls = {s.bill_of_lading for s in existing if s.bill_of_lading}
+
+    # Create shipments for new container numbers (container_number is the tracking key)
+    for container in containers:
+        if container not in existing_containers:
+            # Attach a BL if one was mentioned alongside this container
+            bl = bls[0] if bls else None
+            db.add(Shipment(container_number=container, bill_of_lading=bl, carrier=carrier, user_id=user.id, status="pending_approval"))
+
+    # Create shipments for BL-only references (no container number yet)
+    for bl in bls:
+        if bl not in existing_bls and not containers:
+            db.add(Shipment(container_number=None, bill_of_lading=bl, carrier=carrier, user_id=user.id, status="pending_approval"))
+
+    await db.commit()
+    return containers, bls
+
+# Strip @mentions (e.g. "@15550001234 ") from group message bodies
+_MENTION_RE = re.compile(r"@\d+\s*")
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Message ID deduplication — prevents double-processing when the proxy or
+# Meta retries the same webhook delivery.
+# ---------------------------------------------------------------------------
+
+_seen_message_ids: dict[str, float] = {}  # wamid → timestamp
+_DEDUP_TTL = 300  # seconds to remember a message id (5 min)
+
+
+def _is_duplicate(message_id: str) -> bool:
+    """Return True if this message was already processed recently."""
+    now = time.monotonic()
+    # Evict expired entries
+    expired = [k for k, t in _seen_message_ids.items() if now - t > _DEDUP_TTL]
+    for k in expired:
+        del _seen_message_ids[k]
+    if message_id in _seen_message_ids:
+        return True
+    _seen_message_ids[message_id] = now
+    return False
+
 
 # ---------------------------------------------------------------------------
 # Auth dependency — dedicated webhook secret
@@ -45,12 +134,21 @@ class WhatsAppTextBody(BaseModel):
     body: str
 
 
+class WhatsAppMessageContext(BaseModel):
+    """Present when a message is sent in a group, as a reply, or forwarded."""
+    group_id: str | None = None
+    id: str | None = None  # quoted message id
+    forwarded: bool = False
+    frequently_forwarded: bool = False
+
+
 class WhatsAppMessage(BaseModel):
     from_: str = Field(alias="from")
     id: str
     timestamp: str
     type: str
     text: WhatsAppTextBody | None = None
+    context: WhatsAppMessageContext | None = None  # set for group messages
 
 
 class WhatsAppMetadata(BaseModel):
@@ -155,26 +253,77 @@ async def whatsapp_webhook(
         msg = messages[0]
         sender_phone = _normalize_phone(msg.from_)
 
+        # --- Deduplication -----------------------------------------------------
+        if _is_duplicate(msg.id):
+            logger.info("Duplicate webhook for message %s — skipping", msg.id)
+            return _make_reply(sender_phone, "")
+
         # --- Non-text messages -------------------------------------------------
         if msg.type != "text" or msg.text is None:
             logger.info("Non-text message (type=%s) from %s — skipping", msg.type, sender_phone[-4:])
             return _make_reply(sender_phone, TEXT_ONLY_MESSAGE)
 
-        message_text = msg.text.body.strip()
+        # Strip @mentions so group messages work cleanly with the agent
+        message_text = _MENTION_RE.sub("", msg.text.body).strip()
         if not message_text:
             return _make_reply(sender_phone, TEXT_ONLY_MESSAGE)
 
+        is_group = msg.context is not None and msg.context.group_id is not None
+        if is_group:
+            logger.info("Group message from ...%s (group %s)", sender_phone[-4:], msg.context.group_id)
+
         # --- User lookup by phone ----------------------------------------------
-        result = await db.execute(select(User).where(User.phone == sender_phone))
-        user = result.scalar_one_or_none()
+        wp_result = await db.execute(
+            select(UserWhatsAppPhone).where(UserWhatsAppPhone.phone == sender_phone)
+        )
+        wp_entry = wp_result.scalar_one_or_none()
+        user: User | None = None
+        if wp_entry:
+            user_result = await db.execute(select(User).where(User.id == wp_entry.user_id))
+            user = user_result.scalar_one_or_none()
 
         if user is None:
             logger.info("Unregistered phone %s — rejecting", sender_phone[-4:])
             return _make_reply(sender_phone, UNREGISTERED_MESSAGE)
 
+        is_forwarded = msg.context is not None and msg.context.forwarded
+
+        # --- Forwarded message: extract shipping data, skip agent --------------
+        if is_forwarded:
+            logger.info("Forwarded message from ...%s — extracting shipping data", sender_phone[-4:])
+            containers, bls = await _extract_and_create_shipments(message_text, user, db)
+            if containers or bls:
+                lines = []
+                if bls:
+                    lines.append("BL number(s): " + ", ".join(bls))
+                if containers:
+                    lines.append("Container(s): " + ", ".join(containers))
+                items = "\n• ".join(lines)
+                reply = f"The following shipment(s) have been added:\n• {items}\n\nWould you like to approve them to begin tracking?"
+            else:
+                reply = "I received the forwarded message but couldn't find any container or BL numbers in it. Please forward a message that includes a BL or container number."
+            return _make_reply(sender_phone, reply)
+
+        # --- Direct message: extract any shipping refs then run agent ----------
+        containers, bls = await _extract_and_create_shipments(message_text, user, db)
+
+        agent_message = message_text
+        if containers or bls:
+            parts = []
+            if bls:
+                parts.append("BL numbers: " + ", ".join(bls))
+            if containers:
+                parts.append("container numbers: " + ", ".join(containers))
+            agent_message = (
+                f"{message_text}\n\n"
+                f"[SYSTEM: Extracted {'; '.join(parts)}. "
+                f"Shipments have been added and are pending approval. "
+                f"Tell the user the shipment has been added and ask if they would like to approve it to begin tracking. Do not ask for container numbers.]"
+            )
+
         # --- Run the agent -----------------------------------------------------
         logger.info("WhatsApp message from user %s (phone ...%s)", user.id, sender_phone[-4:])
-        reply = await run_agent(str(user.id), message_text, db)
+        reply = await run_agent(str(user.id), agent_message, db)
 
         if reply is None:
             return _make_reply(sender_phone, FALLBACK_MESSAGE)
