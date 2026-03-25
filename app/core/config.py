@@ -43,13 +43,14 @@ class Settings(BaseSettings):
     whatsapp_proxy_url: str | None = None
     sms_api_key: str | None = None
 
-    # OpenAI (used for mem0 embeddings — text-embedding-3-small)
+    # OpenAI (OCR + AI agent + mem0 embeddings)
     openai_api_key: str | None = None
+    openai_model: str = "gpt-4o"
+    openai_model_agent: str = "gpt-4o"
 
-    # Groq (AI alert generation + agent)
+    # Groq (kept as fallback)
     groq_api_key: str | None = None
     groq_model: str = "llama-3.1-8b-instant"
-    # Agent: Pydantic AI with Qwen 3 via Groq
     groq_model_agent: str = "qwen/qwen3-32b"
 
     # Mem0 (conversation/shipment memory for the agent)

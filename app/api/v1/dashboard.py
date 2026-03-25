@@ -13,7 +13,7 @@ import re
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, ConfigDict, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +22,7 @@ from app.api.deps import require_auth_token
 from app.db.session import get_db
 from app.models.orm import Shipment, User
 from app.schemas.shipment import ShipmentRead
+from app.services.ocr import extract_bl_from_file
 from app.services.tracking import initial_track_shipment
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -185,3 +186,40 @@ async def approve_shipment(
     background_tasks.add_task(initial_track_shipment, shipment.id)
 
     return ShipmentRead.model_validate(shipment)
+
+
+_ALLOWED_MIME_TYPES = {"application/pdf", "image/jpeg", "image/png", "image/webp"}
+
+
+@router.post("/shipments/ocr")
+async def ocr_bill_of_lading(
+    current_user: CurrentUserDep,
+    file: UploadFile = File(...),
+) -> dict:
+    """
+    Upload a Bill of Lading document (PDF or image) and extract shipment data.
+    Returns extracted fields for the frontend to pre-fill the submit form.
+    The user must confirm and call /shipments/submit to actually create the shipment.
+    """
+    mime_type = file.content_type or ""
+    if mime_type not in _ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Unsupported file type. Allowed: PDF, JPG, PNG, WEBP.",
+        )
+
+    file_bytes = await file.read()
+    if len(file_bytes) > 10 * 1024 * 1024:  # 10 MB limit
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="File too large. Maximum size is 10 MB.",
+        )
+
+    result = await extract_bl_from_file(file_bytes, mime_type)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Could not extract data from the document. Please enter the details manually.",
+        )
+
+    return result

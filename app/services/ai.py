@@ -1,5 +1,5 @@
 """
-AI-powered services using Groq:
+AI-powered services using OpenAI GPT-4o:
 - draft_logistics_alert: turn shipment/risk context into a human-readable alert
 - extract_email_shipment_data: parse an inbound email and return structured
   container numbers, BL numbers, carrier, and a short summary
@@ -15,13 +15,22 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+
+
+def _openai_headers() -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {settings.openai_api_key}",
+        "Content-Type": "application/json",
+    }
+
 
 async def extract_email_shipment_data(
     subject: str,
     body: str,
 ) -> dict[str, Any] | None:
     """
-    Use Groq to extract structured shipment data from an inbound email.
+    Use OpenAI GPT-4o to extract structured shipment data from an inbound email.
 
     Returns a dict with:
       container_numbers: list[str]  — ISO 6346 container numbers
@@ -29,10 +38,9 @@ async def extract_email_shipment_data(
       carrier:           str | None — shipping line if identifiable
       summary:           str        — one-sentence summary of the email
 
-    Returns None if Groq is not configured or the call fails; callers should
-    fall back to regex extraction in that case.
+    Returns None if OpenAI is not configured or the call fails.
     """
-    if not settings.groq_api_key:
+    if not settings.openai_api_key:
         return None
 
     prompt = (
@@ -47,19 +55,14 @@ async def extract_email_shipment_data(
         f"Body:\n{body[:3000]}"
     )
 
-    messages = [{"role": "user", "content": prompt}]
-
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {settings.groq_api_key}",
-                    "Content-Type": "application/json",
-                },
+                OPENAI_API_URL,
+                headers=_openai_headers(),
                 json={
-                    "model": settings.groq_model,
-                    "messages": messages,
+                    "model": settings.openai_model,
+                    "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 512,
                     "temperature": 0.0,
                     "response_format": {"type": "json_object"},
@@ -68,23 +71,23 @@ async def extract_email_shipment_data(
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPError as e:
-        logger.warning("groq extract_email_shipment_data failed: %s", e)
+        logger.warning("openai extract_email_shipment_data failed: %s", e)
         return None
 
     try:
         content = data["choices"][0]["message"]["content"]
         return json.loads(content)
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
-        logger.warning("groq email extraction response parse failed: %s", e)
+        logger.warning("openai email extraction response parse failed: %s", e)
         return None
 
 
 async def draft_logistics_alert(context: dict[str, Any]) -> str | None:
     """
-    Use Groq to turn shipment + risk context into a short, clear alert.
-    Returns None if Groq is not configured or the request fails.
+    Use OpenAI GPT-4o to turn shipment + risk context into a short, clear alert.
+    Returns None if OpenAI is not configured or the request fails.
     """
-    if not settings.groq_api_key:
+    if not settings.openai_api_key:
         return None
 
     container = context.get("container_number", "")
@@ -105,19 +108,14 @@ Risk level: {risk}
 
 Write a short, clear alert (2-4 sentences) explaining the situation and what the importer should do next. Be direct and actionable."""
 
-    messages = [{"role": "user", "content": prompt}]
-
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {settings.groq_api_key}",
-                    "Content-Type": "application/json",
-                },
+                OPENAI_API_URL,
+                headers=_openai_headers(),
                 json={
-                    "model": settings.groq_model,
-                    "messages": messages,
+                    "model": settings.openai_model,
+                    "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 256,
                     "temperature": 0.3,
                 },
@@ -125,7 +123,7 @@ Write a short, clear alert (2-4 sentences) explaining the situation and what the
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPError as e:
-        logger.warning("groq draft_logistics_alert failed: %s", e)
+        logger.warning("openai draft_logistics_alert failed: %s", e)
         return None
 
     try:

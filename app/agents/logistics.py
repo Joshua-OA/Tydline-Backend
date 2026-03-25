@@ -1,5 +1,5 @@
 """
-Pydantic AI logistics agent: Qwen 2.5 via Groq + tools (shipments, tracking) + Mem0 memory.
+Pydantic AI logistics agent: GPT-4o via OpenAI + tools (shipments, tracking) + Mem0 memory.
 
 Use from API or WhatsApp webhook: run the agent with user message and deps (session, user_id),
 then store the turn in Mem0 for future context.
@@ -21,7 +21,7 @@ from app.services.tracking import fetch_container_tracking_data
 
 logger = logging.getLogger(__name__)
 
-# Lazy agent creation so we don't require groq/pydantic-ai at import if not used
+# Lazy agent creation so we don't require openai/pydantic-ai at import if not used
 _agent = None
 
 
@@ -34,16 +34,16 @@ class AgentDeps:
 
 
 def _build_agent():
-    if not settings.groq_api_key:
+    if not settings.openai_api_key:
         return None
     try:
         from pydantic_ai import Agent, RunContext
-        from pydantic_ai.models.groq import GroqModel
-        from pydantic_ai.providers.groq import GroqProvider
+        from pydantic_ai.models.openai import OpenAIModel
+        from pydantic_ai.providers.openai import OpenAIProvider
 
-        model = GroqModel(
-            settings.groq_model_agent,
-            provider=GroqProvider(api_key=settings.groq_api_key),
+        model = OpenAIModel(
+            settings.openai_model_agent,
+            provider=OpenAIProvider(api_key=settings.openai_api_key),
         )
         agent = Agent(
             model,
@@ -119,22 +119,19 @@ def _build_agent():
 
         return agent
     except ImportError as e:
-        logger.warning("Pydantic AI / Groq not available: %s", e)
+        logger.warning("Pydantic AI / OpenAI not available: %s", e)
         return None
 
 
 def _strip_thinking(text: str) -> str:
-    """
-    Remove Qwen3 thinking blocks from agent output.
-    Handles both complete <think>...</think> and incomplete blocks (token cutoff).
-    """
+    """Remove any thinking blocks from agent output."""
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     text = re.sub(r"<think>.*", "", text, flags=re.DOTALL)
     return text.strip()
 
 
 def get_logistics_agent():
-    """Return the shared logistics agent, or None if Groq is not configured."""
+    """Return the shared logistics agent, or None if OpenAI is not configured."""
     global _agent
     if _agent is None:
         _agent = _build_agent()
