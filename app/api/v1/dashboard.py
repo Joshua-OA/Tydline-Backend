@@ -149,6 +149,25 @@ async def list_approvals(
     return [ShipmentRead.model_validate(s) for s in all_shipments if _is_pending(s)]
 
 
+@router.get("/shipments/{shipment_id}", response_model=ShipmentRead)
+async def get_dashboard_shipment(
+    shipment_id: uuid.UUID,
+    db: DbSessionDep,
+    current_user: CurrentUserDep,
+) -> ShipmentRead:
+    """Fetch a single shipment by ID, scoped to the current user."""
+    result = await db.execute(
+        select(Shipment).where(
+            Shipment.id == shipment_id,
+            Shipment.user_id == current_user.id,
+        )
+    )
+    shipment = result.scalar_one_or_none()
+    if shipment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shipment not found")
+    return ShipmentRead.model_validate(shipment)
+
+
 @router.post("/shipments/submit", response_model=ShipmentSubmitResponse, status_code=status.HTTP_201_CREATED)
 async def submit_shipment(
     payload: ShipmentSubmit,
