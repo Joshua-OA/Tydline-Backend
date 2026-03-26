@@ -12,7 +12,7 @@ import logging
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -92,6 +92,7 @@ async def request_magic_link(payload: RequestLinkBody, db: DbSessionDep) -> dict
 
 @router.get("/verify", status_code=status.HTTP_200_OK)
 async def verify_token(
+    request: Request,
     response: Response,
     token: Annotated[str, Query(...)],
     db: DbSessionDep,
@@ -118,13 +119,18 @@ async def verify_token(
                 }
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
+    origin = request.headers.get("origin", "")
+    is_localhost = "localhost" in origin
+
+    # Cross-site (localhost → api.tydline.com) requires SameSite=None + Secure.
+    # Same-site production traffic (tydline.com → api.tydline.com) uses Lax.
     response.set_cookie(
         key=_COOKIE_NAME,
         value=user.auth_token,
         max_age=_COOKIE_MAX_AGE,
         httponly=True,
-        secure=settings.environment != "development",
-        samesite="lax",
+        secure=True,
+        samesite="none" if is_localhost else "lax",
     )
     return {
         "user_id": str(user.id),
@@ -133,13 +139,16 @@ async def verify_token(
 
 
 @router.post("/logout", status_code=status.HTTP_200_OK)
-async def logout(response: Response) -> dict:
+async def logout(request: Request, response: Response) -> dict:
     """Clear the session cookie."""
+    origin = request.headers.get("origin", "")
+    is_localhost = "localhost" in origin
+
     response.delete_cookie(
         key=_COOKIE_NAME,
         httponly=True,
-        secure=settings.environment != "development",
-        samesite="lax",
+        secure=True,
+        samesite="none" if is_localhost else "lax",
     )
     return {"message": "Logged out"}
 
