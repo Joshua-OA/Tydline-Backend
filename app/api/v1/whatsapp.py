@@ -65,16 +65,25 @@ async def _create_shipments_from_data(
     existing_containers = {s.container_number for s in existing if s.container_number}
     existing_bls = {s.bill_of_lading for s in existing if s.bill_of_lading}
 
+    new_count = 0
     for container in containers:
         if container not in existing_containers:
             bl = bls[0] if bls else None
             db.add(Shipment(container_number=container, bill_of_lading=bl, carrier=carrier, user_id=user.id, status="pending_approval"))
+            logger.info("whatsapp: created shipment (pending_approval) container=%s bl=%s carrier=%s for user_id=%s", container, bl, carrier, user.id)
+            new_count += 1
 
     for bl in bls:
         if bl not in existing_bls and not containers:
             db.add(Shipment(container_number=None, bill_of_lading=bl, carrier=carrier, user_id=user.id, status="pending_approval"))
+            logger.info("whatsapp: created shipment (pending_approval) bl=%s carrier=%s for user_id=%s", bl, carrier, user.id)
+            new_count += 1
+
+    if existing_containers or existing_bls:
+        logger.info("whatsapp: skipped %d already-tracked items for user_id=%s", len(existing_containers) + len(existing_bls), user.id)
 
     await db.commit()
+    logger.info("whatsapp: _create_shipments_from_data done — new=%d containers=%s bls=%s user_id=%s", new_count, containers, bls, user.id)
     return containers, bls
 
 
@@ -89,12 +98,16 @@ async def _extract_and_create_shipments(
 
     result = await extract_email_shipment_data(subject="", body=text)
     if not result:
+        logger.info("whatsapp: AI extraction found nothing in text (len=%d) for user_id=%s", len(text), user.id)
         return [], []
 
     containers = [c.upper() for c in (result.get("container_numbers") or [])]
     bls = [b.upper() for b in (result.get("bl_numbers") or [])]
     carrier = result.get("carrier") or None
-
+    logger.info(
+        "whatsapp: AI extracted containers=%s bls=%s carrier=%s from text (len=%d) for user_id=%s",
+        containers, bls, carrier, len(text), user.id,
+    )
     return await _create_shipments_from_data(containers, bls, carrier, user, db)
 
 
@@ -166,6 +179,10 @@ async def _handle_media_message(
     containers = [c.upper() for c in (ai_result.get("container_numbers") or [])]
     bls = [b.upper() for b in (ai_result.get("bl_numbers") or [])]
     carrier = ai_result.get("carrier") or None
+    logger.info(
+        "whatsapp: media message extracted containers=%s bls=%s carrier=%s type=%s for user_id=%s",
+        containers, bls, carrier, msg.type, user.id,
+    )
 
     if not containers and not bls:
         return _no_data_reply
@@ -424,7 +441,10 @@ async def whatsapp_webhook(
 
         # --- Forwarded message: extract shipping data, skip agent --------------
         if is_forwarded:
-            logger.info("Forwarded message from ...%s — extracting shipping data", sender_phone[-4:])
+            logger.info(
+                "whatsapp: forwarded message from user_id=%s phone=...%s text_len=%d — extracting shipping data",
+                user.id, sender_phone[-4:], len(message_text),
+            )
             containers, bls = await _extract_and_create_shipments(message_text, user, db)
             if containers or bls:
                 lines = []
@@ -439,6 +459,10 @@ async def whatsapp_webhook(
             return _make_reply(sender_phone, reply)
 
         # --- Direct message: extract any shipping refs then run agent ----------
+        logger.info(
+            "whatsapp: text message from user_id=%s phone=...%s is_group=%s is_forwarded=%s text_len=%d",
+            user.id, sender_phone[-4:], is_group, is_forwarded, len(message_text),
+        )
         containers, bls = await _extract_and_create_shipments(message_text, user, db)
 
         agent_message = message_text

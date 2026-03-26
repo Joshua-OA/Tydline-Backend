@@ -2,6 +2,7 @@
 Shared FastAPI dependencies (auth, etc.).
 """
 
+import logging
 from typing import Annotated
 
 from fastapi import Cookie, Depends, Header, HTTPException, status
@@ -9,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.session import get_db
+
+logger = logging.getLogger(__name__)
 
 
 async def require_api_key(x_api_key: str | None = Header(None, alias="X-API-Key")) -> None:

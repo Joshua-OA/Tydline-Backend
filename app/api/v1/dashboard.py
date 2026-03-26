@@ -9,6 +9,7 @@ POST /api/v1/dashboard/shipments/submit                 — submit a shipment fo
 POST /api/v1/dashboard/approvals/{shipment_id}/approve  — manually approve before 3-day auto-approval
 """
 
+import logging
 import re
 import uuid
 from typing import Annotated
@@ -24,6 +25,8 @@ from app.models.orm import Shipment, User
 from app.schemas.shipment import ShipmentRead
 from app.services.ocr import extract_bl_from_file
 from app.services.tracking import initial_track_shipment
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -109,6 +112,10 @@ async def dashboard_shipments(
     pending = [s for s in all_shipments if _is_pending(s)]
     active = [s for s in all_shipments if not _is_pending(s) and not _is_completed(s)]
     completed = [s for s in all_shipments if _is_completed(s)]
+    logger.info(
+        "dashboard_shipments: user_id=%s email=%s pending=%d active=%d completed=%d",
+        current_user.id, current_user.email, len(pending), len(active), len(completed),
+    )
     return DashboardShipmentsResponse(
         pending_approval=[ShipmentRead.model_validate(s) for s in pending],
         active=[ShipmentRead.model_validate(s) for s in active],
@@ -126,7 +133,9 @@ async def active_shipments(
 ) -> list[ShipmentRead]:
     """Shipments currently being tracked (not yet arrived/delivered)."""
     all_shipments = await _get_user_shipments(current_user, db)
-    return [ShipmentRead.model_validate(s) for s in all_shipments if not _is_pending(s) and not _is_completed(s)]
+    result = [ShipmentRead.model_validate(s) for s in all_shipments if not _is_pending(s) and not _is_completed(s)]
+    logger.info("active_shipments: user_id=%s email=%s count=%d", current_user.id, current_user.email, len(result))
+    return result
 
 
 @router.get("/shipments/completed", response_model=list[ShipmentRead])
@@ -136,7 +145,9 @@ async def completed_shipments(
 ) -> list[ShipmentRead]:
     """Shipments that have arrived or been delivered."""
     all_shipments = await _get_user_shipments(current_user, db)
-    return [ShipmentRead.model_validate(s) for s in all_shipments if _is_completed(s)]
+    result = [ShipmentRead.model_validate(s) for s in all_shipments if _is_completed(s)]
+    logger.info("completed_shipments: user_id=%s email=%s count=%d", current_user.id, current_user.email, len(result))
+    return result
 
 
 @router.get("/approvals", response_model=list[ShipmentRead])
@@ -146,7 +157,9 @@ async def list_approvals(
 ) -> list[ShipmentRead]:
     """Shipments awaiting approval before tracking begins."""
     all_shipments = await _get_user_shipments(current_user, db)
-    return [ShipmentRead.model_validate(s) for s in all_shipments if _is_pending(s)]
+    result = [ShipmentRead.model_validate(s) for s in all_shipments if _is_pending(s)]
+    logger.info("list_approvals: user_id=%s email=%s count=%d", current_user.id, current_user.email, len(result))
+    return result
 
 
 @router.get("/shipments/{shipment_id}", response_model=ShipmentRead)
@@ -156,6 +169,10 @@ async def get_dashboard_shipment(
     current_user: CurrentUserDep,
 ) -> ShipmentRead:
     """Fetch a single shipment by ID, scoped to the current user."""
+    logger.info(
+        "get_dashboard_shipment: user_id=%s email=%s shipment_id=%s",
+        current_user.id, current_user.email, shipment_id,
+    )
     result = await db.execute(
         select(Shipment).where(
             Shipment.id == shipment_id,
@@ -164,7 +181,15 @@ async def get_dashboard_shipment(
     )
     shipment = result.scalar_one_or_none()
     if shipment is None:
+        logger.warning(
+            "get_dashboard_shipment: not found or not owned — user_id=%s shipment_id=%s",
+            current_user.id, shipment_id,
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shipment not found")
+    logger.info(
+        "get_dashboard_shipment: returned shipment_id=%s container=%s bl=%s status=%s",
+        shipment.id, shipment.container_number, shipment.bill_of_lading, shipment.status,
+    )
     return ShipmentRead.model_validate(shipment)
 
 
@@ -179,6 +204,11 @@ async def submit_shipment(
     Submit a shipment for tracking.
     Creates it with tracking_started status and immediately kicks off tracking.
     """
+    logger.info(
+        "submit_shipment: user_id=%s email=%s bl=%s container=%s carrier=%s",
+        current_user.id, current_user.email,
+        payload.bill_of_lading, payload.container_number, payload.carrier,
+    )
     # Duplicate check: same BL, same container number, or BL field contains a container number
     from sqlalchemy import or_
     dup_filter = [Shipment.bill_of_lading == payload.bill_of_lading]
@@ -195,6 +225,10 @@ async def submit_shipment(
     )
     existing_shipment = existing_result.scalar_one_or_none()
     if existing_shipment is not None:
+        logger.info(
+            "submit_shipment: duplicate detected — returning existing shipment_id=%s status=%s for user_id=%s",
+            existing_shipment.id, existing_shipment.status, current_user.id,
+        )
         # Return the existing shipment so the frontend shows its current state
         return ShipmentSubmitResponse(id=existing_shipment.id, status=existing_shipment.status)
 
@@ -215,6 +249,11 @@ async def submit_shipment(
     db.add(shipment)
     await db.commit()
     await db.refresh(shipment)
+    logger.info(
+        "submit_shipment: created shipment_id=%s container=%s bl=%s carrier=%s status=%s for user_id=%s",
+        shipment.id, shipment.container_number, shipment.bill_of_lading,
+        shipment.carrier, shipment.status, current_user.id,
+    )
     background_tasks.add_task(initial_track_shipment, shipment.id)
     return ShipmentSubmitResponse(id=shipment.id, status=shipment.status)
 
@@ -242,6 +281,10 @@ async def notify_me_when_ready(
     shipment.notify_email = payload.email.strip()
     db.add(shipment)
     await db.commit()
+    logger.info(
+        "notify_me: user_id=%s shipment_id=%s notify_email=%s",
+        current_user.id, shipment_id, shipment.notify_email,
+    )
     return {"status": "saved"}
 
 
@@ -275,7 +318,11 @@ async def approve_shipment(
     db.add(shipment)
     await db.commit()
     await db.refresh(shipment)
-
+    logger.info(
+        "approve_shipment: user_id=%s email=%s shipment_id=%s container=%s bl=%s — tracking started",
+        current_user.id, current_user.email, shipment.id,
+        shipment.container_number, shipment.bill_of_lading,
+    )
     background_tasks.add_task(initial_track_shipment, shipment.id)
 
     return ShipmentRead.model_validate(shipment)
@@ -308,11 +355,20 @@ async def ocr_bill_of_lading(
             detail="File too large. Maximum size is 10 MB.",
         )
 
+    logger.info(
+        "ocr_bill_of_lading: user_id=%s email=%s filename=%s mime=%s size=%d",
+        current_user.id, current_user.email, file.filename, mime_type, len(file_bytes),
+    )
     result = await extract_bl_from_file(file_bytes, mime_type)
     if result is None:
+        logger.warning("ocr_bill_of_lading: extraction failed for user_id=%s filename=%s", current_user.id, file.filename)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Could not extract data from the document. Please enter the details manually.",
         )
 
+    logger.info(
+        "ocr_bill_of_lading: extracted for user_id=%s — bl=%s container=%s carrier=%s",
+        current_user.id, result.get("bill_of_lading"), result.get("container_number"), result.get("carrier"),
+    )
     return result

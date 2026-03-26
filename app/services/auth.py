@@ -43,7 +43,10 @@ async def generate_magic_link(user: User, db: AsyncSession, frontend_url: str | 
     await db.refresh(user)
     base = (frontend_url or settings.frontend_url).rstrip("/")
     url = f"{base}/auth/verify?token={raw_token}"
-    logger.debug("Magic link generated for user %s", user.id)
+    logger.info(
+        "generate_magic_link: user_id=%s email=%s token_expires_at=%s link_base=%s",
+        user.id, user.email, user.token_expires_at.isoformat(), base,
+    )
     return url
 
 
@@ -53,23 +56,32 @@ async def verify_magic_link(token: str, db: AsyncSession) -> User | None:
     Returns the User on success, None on failure.
     """
     token_hash = _hash_token(token)
+    logger.info("verify_magic_link: looking up token hash %s…", token_hash[:12])
     result = await db.execute(select(User).where(User.magic_link_token == token_hash))
     user = result.scalar_one_or_none()
 
     if user is None:
-        logger.info("Magic link verification failed — token not found")
+        logger.warning("verify_magic_link: no user found for token hash %s…", token_hash[:12])
         return None
 
-    if user.token_expires_at is None or datetime.now(tz=timezone.utc) > user.token_expires_at:
-        logger.info("Magic link verification failed — token expired for user %s", user.id)
-        # Clear stale token
+    logger.info(
+        "verify_magic_link: found user_id=%s email=%s token_expires_at=%s",
+        user.id, user.email, user.token_expires_at,
+    )
+
+    now = datetime.now(tz=timezone.utc)
+    if user.token_expires_at is None or now > user.token_expires_at:
+        logger.warning(
+            "verify_magic_link: token expired for user_id=%s email=%s (expired=%s now=%s)",
+            user.id, user.email, user.token_expires_at, now.isoformat(),
+        )
         user.magic_link_token = None
         user.token_expires_at = None
         db.add(user)
         await db.commit()
         return None
 
-    # Token is valid — clear it and issue auth_token if not already set
+    had_auth_token = bool(user.auth_token)
     user.magic_link_token = None
     user.token_expires_at = None
     if not user.auth_token:
@@ -77,11 +89,19 @@ async def verify_magic_link(token: str, db: AsyncSession) -> User | None:
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    logger.info("Magic link verified for user %s", user.id)
+    logger.info(
+        "verify_magic_link: success user_id=%s email=%s reused_auth_token=%s",
+        user.id, user.email, had_auth_token,
+    )
     return user
 
 
 async def get_user_by_auth_token(token: str, db: AsyncSession) -> User | None:
     """Look up a user by their Bearer auth_token."""
     result = await db.execute(select(User).where(User.auth_token == token))
-    return result.scalar_one_or_none()
+    user = result.scalar_one_or_none()
+    if user is None:
+        logger.warning("get_user_by_auth_token: no user found for token %s…", token[:8])
+    else:
+        logger.info("get_user_by_auth_token: user_id=%s email=%s", user.id, user.email)
+    return user
