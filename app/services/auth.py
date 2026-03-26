@@ -27,10 +27,13 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-async def generate_magic_link(user: User, db: AsyncSession) -> str:
+async def generate_magic_link(user: User, db: AsyncSession, frontend_url: str | None = None) -> str:
     """
     Create a one-time magic link token, persist its hash + expiry on *user*,
     and return the full verification URL.
+
+    frontend_url overrides settings.frontend_url — pass the request Origin so
+    magic links sent from localhost point back to localhost.
     """
     raw_token = secrets.token_urlsafe(32)
     user.magic_link_token = _hash_token(raw_token)
@@ -38,7 +41,8 @@ async def generate_magic_link(user: User, db: AsyncSession) -> str:
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    url = f"{settings.frontend_url}/auth/verify?token={raw_token}"
+    base = (frontend_url or settings.frontend_url).rstrip("/")
+    url = f"{base}/auth/verify?token={raw_token}"
     logger.debug("Magic link generated for user %s", user.id)
     return url
 

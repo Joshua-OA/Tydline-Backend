@@ -40,22 +40,29 @@ class RequestLinkBody(BaseModel):
 
 
 @router.post("/request-link", status_code=status.HTTP_200_OK)
-async def request_magic_link(payload: RequestLinkBody, db: DbSessionDep) -> dict:
+async def request_magic_link(request: Request, payload: RequestLinkBody, db: DbSessionDep) -> dict:
     """
     Upsert user by email, generate a magic link, and send it via Postmark.
     Always returns 200 — never reveals whether the email already existed.
     """
+    origin = request.headers.get("origin", "")
+    logger.info("request-link: email=%s origin=%r", payload.email, origin or "(none)")
+
     result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalar_one_or_none()
     if user is None:
         user = User(email=payload.email, company_name=payload.company_name)
         db.add(user)
         await db.flush()
+        logger.info("request-link: created new user %s", user.id)
     else:
         user.company_name = payload.company_name
         db.add(user)
+        logger.info("request-link: existing user %s", user.id)
 
-    link = await generate_magic_link(user, db)
+    frontend_url = origin if "localhost" in origin else None
+    logger.info("request-link: magic link will point to %s", frontend_url or settings.frontend_url)
+    link = await generate_magic_link(user, db, frontend_url=frontend_url)
 
     if payload.metadata:
         state = base64.urlsafe_b64encode(
@@ -78,7 +85,7 @@ async def request_magic_link(payload: RequestLinkBody, db: DbSessionDep) -> dict
         html_body = template_path.read_text(encoding="utf-8")
         html_body = html_body.replace("{{email}}", payload.email).replace("{{magic_link}}", link)
     except Exception:
-        logger.warning("Could not load magic-link email template from %s", template_path)
+        logger.warning("request-link: could not load magic-link email template from %s", template_path)
 
     await send_email(
         to=payload.email,
@@ -86,6 +93,7 @@ async def request_magic_link(payload: RequestLinkBody, db: DbSessionDep) -> dict
         text_body=text_body,
         html_body=html_body,
     )
+    logger.info("request-link: magic link email sent to %s", payload.email)
 
     return {"message": "Check your email"}
 
@@ -105,32 +113,37 @@ async def verify_token(
     """
     from app.services.auth import get_user_by_auth_token
 
+    origin = request.headers.get("origin", "")
+    is_localhost = "localhost" in origin
+    logger.info("verify: origin=%r is_localhost=%s existing_cookie=%s", origin or "(none)", is_localhost, bool(tydline_auth))
+
     user = await verify_magic_link(token, db)
 
     if user is None:
+        logger.warning("verify: token invalid or expired")
         # Token already consumed — check if this session is already authenticated
         # (handles double-invocation from React StrictMode / duplicate requests)
         if tydline_auth:
             existing = await get_user_by_auth_token(tydline_auth, db)
             if existing:
+                logger.info("verify: reusing existing session for user %s", existing.id)
                 return {
                     "user_id": str(existing.id),
                     "subscription_status": existing.subscription_status,
                 }
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
-    origin = request.headers.get("origin", "")
-    is_localhost = "localhost" in origin
-
     # Cross-site (localhost → api.tydline.com) requires SameSite=None + Secure.
     # Same-site production traffic (tydline.com → api.tydline.com) uses Lax.
+    samesite = "none" if is_localhost else "lax"
+    logger.info("verify: user %s authenticated — setting cookie secure=True samesite=%s", user.id, samesite)
     response.set_cookie(
         key=_COOKIE_NAME,
         value=user.auth_token,
         max_age=_COOKIE_MAX_AGE,
         httponly=True,
         secure=True,
-        samesite="none" if is_localhost else "lax",
+        samesite=samesite,
     )
     return {
         "user_id": str(user.id),
