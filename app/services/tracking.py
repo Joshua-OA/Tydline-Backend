@@ -580,20 +580,43 @@ async def _apply_tracking_update(
     await session.refresh(shipment)
 
     if notify_email and has_real_data:
+        from pathlib import Path
+
         from app.services.email import send_email
         reference = shipment.container_number or shipment.bill_of_lading or ""
+        status_str = shipment.status or "In progress"
+        vessel_str = shipment.vessel or "Not yet available"
+        origin_str = shipment.origin or "Not yet available"
+        destination_str = shipment.destination or "Not yet available"
+        eta_str = shipment.eta.strftime("%d %b %Y") if shipment.eta else "Not yet available"
+        text_body = (
+            f"Good news! We've picked up live tracking data for {reference}.\n\n"
+            f"Status: {status_str}\n"
+            f"Vessel: {vessel_str}\n"
+            f"Origin: {origin_str}\n"
+            f"Destination: {destination_str}\n"
+            f"ETA: {eta_str}\n\n"
+            "Log in to your Tydline dashboard to see the full details."
+        )
+        html_body: str | None = None
+        template_path = Path(__file__).parent.parent.parent / "emails" / "tracking-live.html"
+        try:
+            html = template_path.read_text(encoding="utf-8")
+            html = html.replace("{{reference}}", reference)
+            html = html.replace("{{status}}", status_str)
+            html = html.replace("{{vessel}}", vessel_str)
+            html = html.replace("{{origin}}", origin_str)
+            html = html.replace("{{destination}}", destination_str)
+            html = html.replace("{{eta}}", eta_str)
+            html = html.replace("{{dashboard_url}}", "https://tydline.com/dashboard")
+            html_body = html
+        except Exception:
+            logger.warning("Could not load tracking-live email template", exc_info=True)
         await send_email(
             to=notify_email,
             subject=f"Your shipment {reference} is now being tracked",
-            text_body=(
-                f"Good news! We've picked up live tracking data for {reference}.\n\n"
-                f"Status: {shipment.status or 'In progress'}\n"
-                f"Vessel: {shipment.vessel or 'Not yet available'}\n"
-                f"Origin: {shipment.origin or 'Not yet available'}\n"
-                f"Destination: {shipment.destination or 'Not yet available'}\n"
-                f"ETA: {shipment.eta.strftime('%d %b %Y') if shipment.eta else 'Not yet available'}\n\n"
-                "Log in to your Tydline dashboard to see the full details."
-            ),
+            text_body=text_body,
+            html_body=html_body,
         )
 
     await persist_timeline_and_risk(

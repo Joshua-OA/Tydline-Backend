@@ -129,7 +129,7 @@ async def add_memory(
     user_id: str,
     messages: list[dict[str, str]],
     metadata: dict[str, Any] | None = None,
-) -> None:
+) -> bool:
     """
     Store a conversation turn or email context for the user.
 
@@ -137,11 +137,12 @@ async def add_memory(
     embeds and stores them as vectors in the Supabase pgvector table.
     Pass natural user/assistant message pairs — avoid role=system.
 
-    No-op if Groq is not configured or Memory failed to initialise.
+    Returns True if the data was successfully stored, False if mem0 is
+    unavailable or an error occurred.
     """
     memory = _get_memory()
     if not memory:
-        return
+        return False
     try:
         await asyncio.to_thread(
             memory.add,
@@ -149,8 +150,10 @@ async def add_memory(
             user_id=user_id,
             metadata=metadata or {},
         )
+        return True
     except Exception as e:
         logger.warning("mem0 add_memory failed: %s", e)
+        return False
 
 
 def search_memory(user_id: str, query: str, limit: int = 8) -> list[str]:
@@ -193,8 +196,8 @@ class AgentMemory:
         user_id: str,
         messages: list[dict[str, str]],
         metadata: dict[str, Any] | None = None,
-    ) -> None:
-        await add_memory(user_id, messages, metadata)
+    ) -> bool:
+        return await add_memory(user_id, messages, metadata)
 
     def search(self, user_id: str, query: str, limit: int = 8) -> list[str]:
         return search_memory(user_id, query, limit)

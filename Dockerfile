@@ -33,8 +33,8 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY app ./app
 COPY emails ./emails
 
-# Non-root user for container security
-RUN useradd --no-create-home --shell /bin/false appuser
+# Non-root user for container security — home dir required by mem0 for cache/config
+RUN useradd --create-home --shell /bin/false appuser
 USER appuser
 
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --workers 2"]

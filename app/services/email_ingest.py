@@ -347,7 +347,7 @@ async def process_inbound_email(
     if user:
         context = _build_mem0_messages(record, bl_numbers, carrier, email_summary)
         try:
-            await add_memory(
+            stored = await add_memory(
                 str(user.id),
                 context,
                 metadata={
@@ -358,8 +358,11 @@ async def process_inbound_email(
                     "matched_shipments": matched_shipment_ids,
                 },
             )
-            record.mem0_stored = True
-            logger.info("Mem0 updated for user %s from email %s", user.id, record.id)
+            if stored:
+                record.mem0_stored = True
+                logger.info("Mem0 updated for user %s from email %s", user.id, record.id)
+            else:
+                logger.warning("Mem0 unavailable — skipping memory storage for email %s", record.id)
         except Exception:
             logger.warning("Mem0 update failed for email %s — continuing", record.id)
 

@@ -14,6 +14,8 @@ Outbound flow (async push) is handled by the notification service via
 POST {WHATSAPP_PROXY_BASE_URL}/whatsapp/external/send with the same secret.
 """
 
+import base64
+import io
 import logging
 import re
 import time
@@ -22,13 +24,59 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.logistics import run_agent
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.orm import Shipment, User, UserWhatsAppPhone
+
+logger = logging.getLogger(__name__)
+
+# Strip @mentions (e.g. "@15550001234 ") from group message bodies
+_MENTION_RE = re.compile(r"@\d+\s*")
+
+
+async def _create_shipments_from_data(
+    containers: list[str],
+    bls: list[str],
+    carrier: str | None,
+    user: User,
+    db: AsyncSession,
+) -> tuple[list[str], list[str]]:
+    """
+    Persist new shipments for any container/BL numbers not already tracked by
+    this user. Returns (containers, bls) unchanged (for reply building).
+    """
+    if not containers and not bls:
+        return [], []
+
+    filters = []
+    if containers:
+        filters.append(Shipment.container_number.in_(containers))
+    if bls:
+        filters.append(Shipment.bill_of_lading.in_(bls))
+
+    existing = (await db.execute(
+        select(Shipment).where(Shipment.user_id == user.id, or_(*filters))
+    )).scalars().all()
+
+    existing_containers = {s.container_number for s in existing if s.container_number}
+    existing_bls = {s.bill_of_lading for s in existing if s.bill_of_lading}
+
+    for container in containers:
+        if container not in existing_containers:
+            bl = bls[0] if bls else None
+            db.add(Shipment(container_number=container, bill_of_lading=bl, carrier=carrier, user_id=user.id, status="pending_approval"))
+
+    for bl in bls:
+        if bl not in existing_bls and not containers:
+            db.add(Shipment(container_number=None, bill_of_lading=bl, carrier=carrier, user_id=user.id, status="pending_approval"))
+
+    await db.commit()
+    return containers, bls
+
 
 async def _extract_and_create_shipments(
     text: str, user: User, db: AsyncSession
@@ -47,43 +95,93 @@ async def _extract_and_create_shipments(
     bls = [b.upper() for b in (result.get("bl_numbers") or [])]
     carrier = result.get("carrier") or None
 
+    return await _create_shipments_from_data(containers, bls, carrier, user, db)
+
+
+def _extract_text_from_pdf(data_b64: str) -> str | None:
+    """
+    Decode a base64-encoded PDF and extract its text layer using pdfplumber.
+    Returns None if extraction fails or produces no usable text.
+    """
+    try:
+        import pdfplumber
+        pdf_bytes = base64.b64decode(data_b64)
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            text = "\n".join(page.extract_text() or "" for page in pdf.pages).strip()
+        return text or None
+    except Exception as exc:
+        logger.warning("PDF text extraction failed: %s", exc)
+        return None
+
+
+async def _handle_media_message(
+    msg: "WhatsAppMessage",
+    user: User,
+    db: AsyncSession,
+) -> str:
+    """
+    Handle a WhatsApp image or document message containing a bill of lading
+    or other shipping document.
+
+    - Image: GPT-4o vision extracts container/BL numbers directly from the photo.
+    - Document (PDF): text layer extracted with pdfplumber, then GPT-4o NLP.
+    - Caption-only fallback when no binary data is present.
+
+    Returns a reply string ready to send back to the user.
+    """
+    from app.services.ai import extract_email_shipment_data, extract_image_shipment_data
+
+    ai_result: dict | None = None
+
+    if msg.type == "image" and msg.image is not None:
+        img = msg.image
+        if img.data:
+            ai_result = await extract_image_shipment_data(
+                base64_image=img.data,
+                mime_type=img.mime_type or "image/jpeg",
+                caption=img.caption,
+            )
+        if ai_result is None and img.caption:
+            # No image data or vision failed — fall back to caption text
+            ai_result = await extract_email_shipment_data(subject="", body=img.caption)
+
+    elif msg.type == "document" and msg.document is not None:
+        doc = msg.document
+        extracted_text: str | None = None
+        if doc.data and (doc.mime_type == "application/pdf" or (doc.filename or "").lower().endswith(".pdf")):
+            extracted_text = _extract_text_from_pdf(doc.data)
+        if extracted_text:
+            ai_result = await extract_email_shipment_data(subject=doc.filename or "", body=extracted_text)
+        elif doc.caption:
+            ai_result = await extract_email_shipment_data(subject=doc.filename or "", body=doc.caption)
+
+    _no_data_reply = (
+        "I received your file but couldn't find any container or BL numbers in it. "
+        "Please ensure the document contains a container number or Bill of Lading reference."
+    )
+
+    if not ai_result:
+        return _no_data_reply
+
+    containers = [c.upper() for c in (ai_result.get("container_numbers") or [])]
+    bls = [b.upper() for b in (ai_result.get("bl_numbers") or [])]
+    carrier = ai_result.get("carrier") or None
+
     if not containers and not bls:
-        return [], []
+        return _no_data_reply
 
-    # Find existing shipments to avoid duplicates
-    from sqlalchemy import or_
-    filters = []
-    if containers:
-        filters.append(Shipment.container_number.in_(containers))
+    containers, bls = await _create_shipments_from_data(containers, bls, carrier, user, db)
+
+    lines = []
     if bls:
-        filters.append(Shipment.bill_of_lading.in_(bls))
-
-    existing = (await db.execute(
-        select(Shipment).where(Shipment.user_id == user.id, or_(*filters))
-    )).scalars().all()
-
-    existing_containers = {s.container_number for s in existing if s.container_number}
-    existing_bls = {s.bill_of_lading for s in existing if s.bill_of_lading}
-
-    # Create shipments for new container numbers (container_number is the tracking key)
-    for container in containers:
-        if container not in existing_containers:
-            # Attach a BL if one was mentioned alongside this container
-            bl = bls[0] if bls else None
-            db.add(Shipment(container_number=container, bill_of_lading=bl, carrier=carrier, user_id=user.id, status="pending_approval"))
-
-    # Create shipments for BL-only references (no container number yet)
-    for bl in bls:
-        if bl not in existing_bls and not containers:
-            db.add(Shipment(container_number=None, bill_of_lading=bl, carrier=carrier, user_id=user.id, status="pending_approval"))
-
-    await db.commit()
-    return containers, bls
-
-# Strip @mentions (e.g. "@15550001234 ") from group message bodies
-_MENTION_RE = re.compile(r"@\d+\s*")
-
-logger = logging.getLogger(__name__)
+        lines.append("BL number(s): " + ", ".join(bls))
+    if containers:
+        lines.append("Container(s): " + ", ".join(containers))
+    items = "\n• ".join(lines)
+    return (
+        f"The following shipment(s) have been added:\n• {items}\n\n"
+        "Would you like to approve them to begin tracking?"
+    )
 
 # ---------------------------------------------------------------------------
 # Message ID deduplication — prevents double-processing when the proxy or
@@ -134,6 +232,23 @@ class WhatsAppTextBody(BaseModel):
     body: str
 
 
+class WhatsAppImageBody(BaseModel):
+    caption: str | None = None
+    mime_type: str | None = None
+    sha256: str | None = None
+    id: str | None = None
+    data: str | None = None  # base64-encoded binary injected by the proxy
+
+
+class WhatsAppDocumentBody(BaseModel):
+    filename: str | None = None
+    caption: str | None = None
+    mime_type: str | None = None
+    sha256: str | None = None
+    id: str | None = None
+    data: str | None = None  # base64-encoded binary injected by the proxy
+
+
 class WhatsAppMessageContext(BaseModel):
     """Present when a message is sent in a group, as a reply, or forwarded."""
     group_id: str | None = None
@@ -148,6 +263,8 @@ class WhatsAppMessage(BaseModel):
     timestamp: str
     type: str
     text: WhatsAppTextBody | None = None
+    image: WhatsAppImageBody | None = None
+    document: WhatsAppDocumentBody | None = None
     context: WhatsAppMessageContext | None = None  # set for group messages
 
 
@@ -258,7 +375,24 @@ async def whatsapp_webhook(
             logger.info("Duplicate webhook for message %s — skipping", msg.id)
             return _make_reply(sender_phone, "")
 
-        # --- Non-text messages -------------------------------------------------
+        # --- Image / document messages (bill of lading photo, PDF, etc.) -------
+        if msg.type in ("image", "document"):
+            wp_result = await db.execute(
+                select(UserWhatsAppPhone).where(UserWhatsAppPhone.phone == sender_phone)
+            )
+            wp_entry = wp_result.scalar_one_or_none()
+            media_user: User | None = None
+            if wp_entry:
+                user_result = await db.execute(select(User).where(User.id == wp_entry.user_id))
+                media_user = user_result.scalar_one_or_none()
+            if media_user is None:
+                logger.info("Unregistered phone %s — rejecting media message", sender_phone[-4:])
+                return _make_reply(sender_phone, UNREGISTERED_MESSAGE)
+            logger.info("Media message (type=%s) from user %s (phone ...%s)", msg.type, media_user.id, sender_phone[-4:])
+            reply = await _handle_media_message(msg, media_user, db)
+            return _make_reply(sender_phone, reply)
+
+        # --- Unsupported message types (audio, video, sticker, reaction, …) ---
         if msg.type != "text" or msg.text is None:
             logger.info("Non-text message (type=%s) from %s — skipping", msg.type, sender_phone[-4:])
             return _make_reply(sender_phone, TEXT_ONLY_MESSAGE)

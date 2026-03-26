@@ -6,6 +6,7 @@ Notification service responsible for:
 """
 
 import logging
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -18,10 +19,28 @@ from app.utils.retry import with_retries  # still used by _send_whatsapp / _send
 
 logger = logging.getLogger(__name__)
 
+_TEMPLATE_DIR = Path(__file__).parent.parent.parent / "emails"
+_DASHBOARD_URL = "https://tydline.com/dashboard"
 
-async def _send_email(recipient_email: str, subject: str, body: str) -> None:
-    from app.services.email import send_email
-    await send_email(to=recipient_email, subject=subject, text_body=body)
+
+def _render_shipment_update_html(
+    container_number: str,
+    old_status: str,
+    new_status: str,
+    message: str,
+) -> str | None:
+    template_path = _TEMPLATE_DIR / "shipment-update.html"
+    try:
+        html = template_path.read_text(encoding="utf-8")
+        html = html.replace("{{container_number}}", container_number)
+        html = html.replace("{{old_status}}", old_status)
+        html = html.replace("{{new_status}}", new_status)
+        html = html.replace("{{message}}", message.replace("\n", "<br>"))
+        html = html.replace("{{dashboard_url}}", _DASHBOARD_URL)
+        return html
+    except Exception as exc:
+        logger.warning("Could not load shipment-update email template: %s", exc)
+        return None
 
 
 async def _send_whatsapp(phone_number: str, message: str) -> None:
@@ -105,10 +124,18 @@ async def send_shipment_update_notification(
 
     # Dispatch through available channels.
     if user.email:
-        await _send_email(
-            recipient_email=user.email,
+        html_body = _render_shipment_update_html(
+            container_number=shipment.container_number or "",
+            old_status=old_status,
+            new_status=new_status,
+            message=message,
+        )
+        from app.services.email import send_email
+        await send_email(
+            to=user.email,
             subject=f"Shipment update: {shipment.container_number}",
-            body=message,
+            text_body=message,
+            html_body=html_body,
         )
 
     if user.phone:
@@ -177,7 +204,19 @@ async def send_shipment_status_change_notification(
 
     subject = "Shipment Update"
     if user.email:
-        await _send_email(recipient_email=user.email, subject=subject, body=body)
+        html_body = _render_shipment_update_html(
+            container_number=shipment.container_number or "",
+            old_status=old_status,
+            new_status=new_status,
+            message=body,
+        )
+        from app.services.email import send_email
+        await send_email(
+            to=user.email,
+            subject=subject,
+            text_body=body,
+            html_body=html_body,
+        )
     if user.phone:
         await _send_whatsapp(phone_number=user.phone, message=body)
         await _send_sms(phone_number=user.phone, message=body)
