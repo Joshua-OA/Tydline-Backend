@@ -454,9 +454,21 @@ async def initial_track_shipment(shipment_id: uuid.UUID) -> None:
         if not reference:
             return
 
+        # Reuse a known ShipsGo ID from any shipment for the same container (cross-user)
+        shipsgo_id_hint = shipment.shipsgo_shipment_id
+        if not shipsgo_id_hint:
+            existing = await session.execute(
+                select(orm.Shipment.shipsgo_shipment_id).where(
+                    orm.Shipment.container_number == reference,
+                    orm.Shipment.shipsgo_shipment_id.isnot(None),
+                    orm.Shipment.id != shipment_id,
+                ).limit(1)
+            )
+            shipsgo_id_hint = existing.scalar_one_or_none()
+
         tracking_data = await fetch_container_tracking_data(
             reference,
-            shipsgo_id_hint=shipment.shipsgo_shipment_id,
+            shipsgo_id_hint=shipsgo_id_hint,
         )
         if not tracking_data:
             return
@@ -476,14 +488,27 @@ async def refresh_all_active_shipments() -> None:
         )
         shipments = result.scalars().all()
 
+        # Build a map of container → shipsgo_id from shipments that already have one
+        shipsgo_id_map: dict[str, str] = {
+            s.container_number: s.shipsgo_shipment_id
+            for s in shipments
+            if s.container_number and s.shipsgo_shipment_id
+        }
+
         for shipment in shipments:
             reference = shipment.container_number or shipment.bill_of_lading
             if not reference:
                 continue
 
+            # Use own ID, then cross-shipment map (avoids 402 re-registration)
+            shipsgo_id_hint = (
+                shipment.shipsgo_shipment_id
+                or shipsgo_id_map.get(reference)
+            )
+
             tracking_data = await fetch_container_tracking_data(
                 reference,
-                shipsgo_id_hint=shipment.shipsgo_shipment_id,
+                shipsgo_id_hint=shipsgo_id_hint,
             )
             if not tracking_data:
                 continue
