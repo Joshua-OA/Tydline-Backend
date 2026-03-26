@@ -160,21 +160,35 @@ async def submit_shipment(
     Submit a shipment for tracking.
     Creates it with tracking_started status and immediately kicks off tracking.
     """
-    existing = await db.execute(
+    # Duplicate check: same BL, same container number, or BL field contains a container number
+    from sqlalchemy import or_
+    dup_filter = [Shipment.bill_of_lading == payload.bill_of_lading]
+    if payload.container_number:
+        dup_filter.append(Shipment.container_number == payload.container_number)
+    # User may enter a container number in the BL field — catch that too
+    if _CONTAINER_RE.match(payload.bill_of_lading):
+        dup_filter.append(Shipment.container_number == payload.bill_of_lading)
+    existing_result = await db.execute(
         select(Shipment).where(
             Shipment.user_id == current_user.id,
-            Shipment.bill_of_lading == payload.bill_of_lading,
+            or_(*dup_filter),
         )
     )
-    if existing.scalar_one_or_none() is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A shipment with this bill of lading already exists",
-        )
+    existing_shipment = existing_result.scalar_one_or_none()
+    if existing_shipment is not None:
+        # Return the existing shipment so the frontend shows its current state
+        return ShipmentSubmitResponse(id=existing_shipment.id, status=existing_shipment.status)
+
+    # If the user entered a container number in the BL field, move it to the right field
+    container_number = payload.container_number
+    bill_of_lading = payload.bill_of_lading
+    if not container_number and _CONTAINER_RE.match(bill_of_lading):
+        container_number = bill_of_lading
+        bill_of_lading = None
 
     shipment = Shipment(
-        container_number=payload.container_number,
-        bill_of_lading=payload.bill_of_lading,
+        container_number=container_number,
+        bill_of_lading=bill_of_lading,
         carrier=payload.carrier,
         user_id=current_user.id,
         status="tracking_started",
