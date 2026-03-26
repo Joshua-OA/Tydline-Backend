@@ -10,6 +10,7 @@ Flow:
 import hashlib
 import logging
 import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -21,6 +22,15 @@ from app.models.orm import User
 logger = logging.getLogger(__name__)
 
 _TOKEN_EXPIRY_MINUTES = 30
+
+# Fixed namespace for deterministic user IDs derived from email.
+# UUID5(namespace, email) always produces the same UUID for the same email.
+_USER_ID_NAMESPACE = uuid.UUID("6ba7b814-9dad-11d1-80b4-00c04fd430c8")
+
+
+def user_id_from_email(email: str) -> uuid.UUID:
+    """Return a deterministic UUID5 for *email* (lowercased + stripped)."""
+    return uuid.uuid5(_USER_ID_NAMESPACE, email.lower().strip())
 
 
 def _hash_token(token: str) -> str:

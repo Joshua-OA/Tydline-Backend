@@ -14,13 +14,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.orm import User
-from app.services.auth import generate_magic_link, verify_magic_link
+from app.services.auth import generate_magic_link, user_id_from_email, verify_magic_link
 from app.services.email import send_email
 
 logger = logging.getLogger(__name__)
@@ -48,17 +48,22 @@ async def request_magic_link(request: Request, payload: RequestLinkBody, db: DbS
     origin = request.headers.get("origin", "")
     logger.info("request-link: email=%s origin=%r", payload.email, origin or "(none)")
 
-    result = await db.execute(select(User).where(User.email == payload.email))
-    user = result.scalar_one_or_none()
-    if user is None:
-        user = User(email=payload.email, company_name=payload.company_name)
-        db.add(user)
-        await db.flush()
-        logger.info("request-link: created new user %s", user.id)
-    else:
-        user.company_name = payload.company_name
-        db.add(user)
-        logger.info("request-link: existing user %s", user.id)
+    # Atomic upsert with deterministic ID — same email always gets the same UUID.
+    # Avoids TOCTOU race conditions and makes user_id predictable from email.
+    uid = user_id_from_email(payload.email)
+    stmt = (
+        pg_insert(User)
+        .values(id=uid, email=payload.email, company_name=payload.company_name)
+        .on_conflict_do_update(
+            index_elements=["email"],
+            set_={"company_name": payload.company_name},
+        )
+        .returning(User)
+    )
+    result = await db.execute(stmt)
+    user = result.scalar_one()
+    await db.flush()
+    logger.info("request-link: upserted user %s email=%s", user.id, user.email)
 
     frontend_url = origin if "localhost" in origin else None
     logger.info("request-link: magic link will point to %s", frontend_url or settings.frontend_url)
