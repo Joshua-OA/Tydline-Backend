@@ -338,8 +338,8 @@ router = APIRouter(
 
 DbSessionDep = Annotated[AsyncSession, Depends(get_db)]
 
-FALLBACK_MESSAGE = "Sorry, I'm unable to process your request right now. Please try again later."
-TEXT_ONLY_MESSAGE = "I can only process text messages at the moment. Please send a text message."
+FALLBACK_MESSAGE = "Hi, TASA here. I'm unable to process your request right now — please try again in a moment."
+TEXT_ONLY_MESSAGE = "Hi, TASA here. I can only process text messages at the moment. Please send a text message."
 UNREGISTERED_MESSAGE = (
     "Your phone number is not registered with Tydline. "
     "Please sign up first at tydline.com to start tracking shipments via WhatsApp."
@@ -460,10 +460,14 @@ async def whatsapp_webhook(
 
         # --- Direct message: extract any shipping refs then run agent ----------
         logger.info(
-            "whatsapp: text message from user_id=%s phone=...%s is_group=%s is_forwarded=%s text_len=%d",
-            user.id, sender_phone[-4:], is_group, is_forwarded, len(message_text),
+            "whatsapp: text message from user_id=%s phone=...%s is_group=%s is_forwarded=%s text_len=%d body=%r",
+            user.id, sender_phone[-4:], is_group, is_forwarded, len(message_text), message_text[:120],
         )
         containers, bls = await _extract_and_create_shipments(message_text, user, db)
+        logger.info(
+            "whatsapp: extraction result — containers=%s bls=%s user_id=%s",
+            containers, bls, user.id,
+        )
 
         agent_message = message_text
         if containers or bls:
@@ -478,12 +482,21 @@ async def whatsapp_webhook(
                 f"Shipments have been added and are pending approval. "
                 f"Tell the user the shipment has been added and ask if they would like to approve it to begin tracking. Do not ask for container numbers.]"
             )
+            logger.info("whatsapp: injected EXTRACTED tag into agent message for user_id=%s", user.id)
 
         # --- Run the agent -----------------------------------------------------
-        logger.info("WhatsApp message from user %s (phone ...%s)", user.id, sender_phone[-4:])
+        logger.info(
+            "whatsapp: running agent for user_id=%s agent_message_len=%d",
+            user.id, len(agent_message),
+        )
         reply = await run_agent(str(user.id), agent_message, db)
+        logger.info(
+            "whatsapp: agent reply for user_id=%s — reply_len=%s reply_is_none=%s",
+            user.id, len(reply) if reply else 0, reply is None,
+        )
 
         if reply is None:
+            logger.warning("whatsapp: agent returned None for user_id=%s — sending fallback", user.id)
             return _make_reply(sender_phone, FALLBACK_MESSAGE)
 
         return _make_reply(sender_phone, reply)
