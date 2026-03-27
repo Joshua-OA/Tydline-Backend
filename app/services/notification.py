@@ -137,7 +137,12 @@ async def _send_whatsapp_template(
     relative_arrival: str,
 ) -> None:
     """
-    Send the approved 'shipment_update' WhatsApp template via the proxy.
+    Send the approved 'shipment_update' WhatsApp template AND a matching plain-text
+    message to the same number.
+
+    The template is required for cold outreach (outside the 24-hour window).
+    The plain-text message works inside the free conversation window and mirrors
+    the same content without {{}} placeholders.
 
     Template body: "Hello, your shipment with Bill of Lading Number {{1}} will arrive
     on the {{2}} which is arriving in {{3}}. This is the perfect time to begin all
@@ -150,7 +155,13 @@ async def _send_whatsapp_template(
     phone = phone_number.lstrip("+")
     phone_suffix = phone[-4:] if len(phone) >= 4 else "****"
 
-    payload: dict[str, Any] = {
+    headers = {
+        "X-Webhook-Secret": settings.whatsapp_webhook_secret,
+        "Content-Type": "application/json",
+    }
+
+    # ── 1. Template message (works outside the 24-hour window) ──────────────
+    template_payload: dict[str, Any] = {
         "to": phone,
         "message": {
             "type": "template",
@@ -169,21 +180,115 @@ async def _send_whatsapp_template(
         },
     }
 
-    async def _post() -> httpx.Response:
+    async def _post_template() -> httpx.Response:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            return await client.post(
-                settings.whatsapp_proxy_url,
-                headers={
-                    "X-Webhook-Secret": settings.whatsapp_webhook_secret,
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
+            return await client.post(settings.whatsapp_proxy_url, headers=headers, json=template_payload)
 
-    resp = await with_retries(_post)
+    resp = await with_retries(_post_template)
+    if resp is None or not resp.is_success:
+        logger.warning("WhatsApp template push failed or retries exhausted (to ...%s)", phone_suffix)
+
+    # ── 2. Plain-text message (works inside the 24-hour conversation window) ─
+    plain_text = (
+        f"Hi, TASA here. Your shipment with Bill of Lading {bl_number} will arrive "
+        f"on {eta_date}, which is {relative_arrival} away. "
+        f"This is the perfect time to begin your clearing processes."
+    )
+    plain_payload: dict[str, Any] = {
+        "to": phone,
+        "message": {
+            "type": "text",
+            "content": plain_text,
+        },
+    }
+
+    async def _post_plain() -> httpx.Response:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            return await client.post(settings.whatsapp_proxy_url, headers=headers, json=plain_payload)
+
+    resp2 = await with_retries(_post_plain)
+    if resp2 is None or not resp2.is_success:
+        logger.warning("WhatsApp plain-text push failed or retries exhausted (to ...%s)", phone_suffix)
+    else:
+        logger.info("WhatsApp template+text sent to ...%s bl=%s eta=%s", phone_suffix, bl_number, eta_date)
+
+
+async def _send_whatsapp_not_found(
+    phone_number: str,
+    reference: str,
+) -> None:
+    """
+    Notify a user that tracking data could not be found — via both the
+    'tracking_not_found' WhatsApp template (for outside the 24-hour window)
+    and a matching plain-text message (for inside the active conversation window).
+    """
+    if not (settings.whatsapp_proxy_url and settings.whatsapp_webhook_secret):
+        logger.debug("WhatsApp proxy not configured — skipping not-found message")
+        return
+
+    phone = phone_number.lstrip("+")
+    phone_suffix = phone[-4:] if len(phone) >= 4 else "****"
+
+    headers = {
+        "X-Webhook-Secret": settings.whatsapp_webhook_secret,
+        "Content-Type": "application/json",
+    }
+
+    # ── 1. Template message (outside the 24-hour window) ────────────────────
+    template_payload: dict[str, Any] = {
+        "to": phone,
+        "message": {
+            "type": "template",
+            "template_name": "tracking_not_found",
+            "language": "en_US",
+            "components": [
+                {
+                    "type": "body",
+                    "parameters": [
+                        {"type": "text", "text": reference},
+                    ],
+                }
+            ],
+        },
+    }
+
+    async def _post_template() -> httpx.Response:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            return await client.post(settings.whatsapp_proxy_url, headers=headers, json=template_payload)
+
+    resp = await with_retries(_post_template)
     if resp is None or not resp.is_success:
         logger.warning(
-            "WhatsApp template push failed or retries exhausted (to ...%s)", phone_suffix
+            "WhatsApp not-found template push failed or retries exhausted (to ...%s)", phone_suffix
+        )
+
+    # ── 2. Plain-text message (inside the 24-hour conversation window) ───────
+    plain_text = (
+        f"Hi, TASA here. I tried to find tracking info for {reference} but came up empty. "
+        f"This usually means the reference was entered incorrectly or the carrier hasn't "
+        f"published data yet. Please double-check the BL number on your Tydline dashboard "
+        f"or contact your carrier for the correct reference."
+    )
+    plain_payload: dict[str, Any] = {
+        "to": phone,
+        "message": {
+            "type": "text",
+            "content": plain_text,
+        },
+    }
+
+    async def _post_plain() -> httpx.Response:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            return await client.post(settings.whatsapp_proxy_url, headers=headers, json=plain_payload)
+
+    resp2 = await with_retries(_post_plain)
+    if resp2 is None or not resp2.is_success:
+        logger.warning(
+            "WhatsApp not-found plain-text push failed or retries exhausted (to ...%s)", phone_suffix
+        )
+    else:
+        logger.info(
+            "WhatsApp not-found template+text sent to ...%s ref=%s", phone_suffix, reference
         )
 
 
@@ -416,12 +521,8 @@ async def send_tracking_not_found_notification(
     )
     wa_phones = list(result.scalars().all())
     if _whatsapp_enabled(user, wa_phones):
-        wa_text = (
-            f"Hi, TASA here. I tried to find tracking info for {reference} but came up empty. "
-            f"Please double-check the BL number on your Tydline dashboard or contact your carrier."
-        )
         for phone_record in wa_phones:
-            await _send_whatsapp(phone_record.phone, wa_text)
+            await _send_whatsapp_not_found(phone_record.phone, reference)
         logger.info(
             "send_tracking_not_found_notification: notified user_id=%s via email+whatsapp ref=%s",
             user.id, reference,
