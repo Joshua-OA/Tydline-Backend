@@ -474,7 +474,7 @@ async def whatsapp_webhook(
                 parts.append("container numbers: " + ", ".join(containers))
             agent_message = (
                 f"{message_text}\n\n"
-                f"[SYSTEM: Extracted {'; '.join(parts)}. "
+                f"[EXTRACTED: {'; '.join(parts)}. "
                 f"Shipments have been added and are pending approval. "
                 f"Tell the user the shipment has been added and ask if they would like to approve it to begin tracking. Do not ask for container numbers.]"
             )

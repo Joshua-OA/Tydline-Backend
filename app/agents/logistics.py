@@ -9,7 +9,9 @@ Every agent run is automatically traced by Logfire (instrument_pydantic_ai).
 
 import logging
 import re
-from dataclasses import dataclass
+import time
+from collections import deque
+from dataclasses import dataclass, field
 from uuid import UUID
 
 from sqlalchemy import select
@@ -20,6 +22,41 @@ from app.models import orm
 from app.services.tracking import fetch_container_tracking_data
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Short-term conversation history (sliding window per user, in-memory)
+# ---------------------------------------------------------------------------
+
+_HISTORY_TTL = 30 * 60  # 30 minutes
+_HISTORY_MAX_TURNS = 5  # number of (user, assistant) pairs to retain
+
+@dataclass
+class _Turn:
+    user: str
+    assistant: str
+    ts: float = field(default_factory=time.monotonic)
+
+# user_id → deque of recent turns
+_recent_turns: dict[str, deque] = {}
+
+
+def _get_recent_turns(user_id: str) -> list[_Turn]:
+    """Return recent turns for user, evicting stale ones."""
+    turns = _recent_turns.get(user_id)
+    if not turns:
+        return []
+    now = time.monotonic()
+    while turns and now - turns[0].ts > _HISTORY_TTL:
+        turns.popleft()
+    return list(turns)
+
+
+def _save_turn(user_id: str, user_msg: str, assistant_msg: str) -> None:
+    """Append a turn to the user's recent history."""
+    if user_id not in _recent_turns:
+        _recent_turns[user_id] = deque(maxlen=_HISTORY_MAX_TURNS)
+    _recent_turns[user_id].append(_Turn(user=user_msg, assistant=assistant_msg))
+
 
 # Lazy agent creation so we don't require openai/pydantic-ai at import if not used
 _agent = None
@@ -69,6 +106,15 @@ def _build_agent():
             memories = agent_memory.search(ctx.deps.user_id, "shipments containers tracking bill of lading email", limit=8)
             if memories:
                 base += "\n\nRelevant context from past conversations:\n" + "\n".join(f"- {m}" for m in memories)
+
+            recent = _get_recent_turns(ctx.deps.user_id)
+            if recent:
+                history_lines = []
+                for turn in recent:
+                    history_lines.append(f"User: {turn.user}")
+                    history_lines.append(f"Assistant: {turn.assistant}")
+                base += "\n\nRecent conversation (most relevant for short follow-up replies):\n" + "\n".join(history_lines)
+
             return base
 
         @agent.tool
@@ -155,6 +201,7 @@ async def run_agent(user_id: str, message: str, session: AsyncSession) -> str | 
         result = await agent.run(message, deps=deps)
         output = result.output if hasattr(result, "output") else str(result)
         output = _strip_thinking(output)
+        _save_turn(user_id, message, output)
         await agent_memory.add(
             user_id,
             [{"role": "user", "content": message}, {"role": "assistant", "content": output}],
