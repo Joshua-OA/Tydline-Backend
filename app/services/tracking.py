@@ -601,13 +601,13 @@ async def _apply_tracking_update(
         destination_str = shipment.destination or "Not yet available"
         eta_str = shipment.eta.strftime("%d %b %Y") if shipment.eta else "Not yet available"
         text_body = (
-            f"Good news! We've picked up live tracking data for {reference}.\n\n"
+            f"Hi, TASA here. I've picked up live tracking data for {reference}.\n\n"
             f"Status: {status_str}\n"
             f"Vessel: {vessel_str}\n"
             f"Origin: {origin_str}\n"
             f"Destination: {destination_str}\n"
             f"ETA: {eta_str}\n\n"
-            "Log in to your Tydline dashboard to see the full details."
+            "Log in to your Tydline dashboard to see the full details.\n\n— TASA"
         )
         html_body: str | None = None
         template_path = Path(__file__).parent.parent.parent / "emails" / "tracking-live.html"

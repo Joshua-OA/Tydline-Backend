@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Shipment update — Tydline</title>
+  <title>Tracking not found — Tydline</title>
 </head>
 <body style="margin:0;padding:0;background-color:#f5f7ff;font-family:'Inter',Arial,sans-serif;">
   <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f5f7ff;padding:40px 16px;">
@@ -23,47 +23,38 @@
           <!-- Body -->
           <tr>
             <td style="padding:36px 32px 28px;text-align:center;">
-
               <h1 style="margin:0 0 8px;font-size:20px;font-weight:800;color:#052698;letter-spacing:-0.3px;">
-                Shipment update
+                Tracking not found
               </h1>
-              <p style="margin:0 0 28px;font-size:14px;color:#000000;opacity:0.6;line-height:1.6;">
-                Hi, <strong>TASA here.</strong> There's a status change on one of your tracked shipments.
+              <p style="margin:0 0 28px;font-size:14px;color:#000000;line-height:1.6;">
+                Hi, <strong>TASA here.</strong> I tried to look up tracking information for the reference below but couldn't find anything. This usually means the number was entered incorrectly or the carrier hasn't published data yet.
               </p>
 
-              <!-- Status box -->
-              <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid rgba(5,38,152,0.12);background-color:#FCFDFF;margin-bottom:24px;text-align:left;">
+              <!-- Reference box -->
+              <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid rgba(5,38,152,0.12);background-color:#FCFDFF;margin-bottom:28px;text-align:left;">
                 <tr>
                   <td style="padding:16px 20px;border-bottom:1px solid rgba(5,38,152,0.08);">
-                    <span style="font-size:12px;color:#000000;opacity:0.5;display:block;margin-bottom:4px;">Shipment</span>
-                    <span style="font-size:14px;font-weight:600;color:#052698;">{{container_number}}</span>
-                  </td>
-                </tr>
-                <tr>
-                  <td style="padding:16px 20px;border-bottom:1px solid rgba(5,38,152,0.08);">
-                    <span style="font-size:12px;color:#000000;opacity:0.5;display:block;margin-bottom:4px;">Previous status</span>
-                    <span style="font-size:14px;font-weight:600;color:#000000;">{{old_status}}</span>
+                    <span style="font-size:12px;color:#000000;opacity:0.5;display:block;margin-bottom:4px;">Reference</span>
+                    <span style="font-size:14px;font-weight:600;color:#052698;">{{reference}}</span>
                   </td>
                 </tr>
                 <tr>
                   <td style="padding:16px 20px;">
-                    <span style="font-size:12px;color:#000000;opacity:0.5;display:block;margin-bottom:4px;">New status</span>
-                    <span style="font-size:14px;font-weight:600;color:#052698;">{{new_status}}</span>
+                    <span style="font-size:12px;color:#000000;opacity:0.5;display:block;margin-bottom:4px;">Status</span>
+                    <span style="font-size:14px;font-weight:600;color:#c0392b;">Not found</span>
                   </td>
                 </tr>
               </table>
 
-              <!-- Alert message -->
-              <div style="border:1px solid rgba(5,38,152,0.12);background-color:#FCFDFF;padding:16px 20px;font-size:13px;color:#000000;line-height:1.7;text-align:left;margin-bottom:28px;">
-                {{message}}
-              </div>
-
               <!-- CTA -->
               <a href="{{dashboard_url}}"
                  style="display:inline-block;background-color:#052698;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;padding:12px 32px;letter-spacing:0.2px;">
-                View shipment &rarr;
+                Update reference in dashboard &rarr;
               </a>
 
+              <p style="margin:24px 0 0;font-size:12px;color:#000000;opacity:0.5;line-height:1.6;">
+                Please double-check the Bill of Lading or container number, or contact your carrier for the correct reference.
+              </p>
             </td>
           </tr>
 

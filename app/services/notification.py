@@ -211,7 +211,7 @@ async def send_approval_tracking_notification(
     ai_body = await draft_logistics_alert(context)
 
     fallback_lines = [
-        f"Your shipment {shipment.container_number or shipment.bill_of_lading} is now being tracked.",
+        f"Hi, TASA here. I'm now tracking your shipment {shipment.container_number or shipment.bill_of_lading}.",
         f"Status: {new_status}",
     ]
     if shipment.eta:
@@ -320,13 +320,13 @@ async def send_approval_request_notification(shipment_id: uuid.UUID) -> None:
                 logger.warning("Could not load approval-request email template: %s", exc)
 
             text_body = (
-                f"A new shipment is waiting for your approval.\n\n"
+                f"Hi, TASA here. I've received a new shipment and need your approval before I can start tracking it.\n\n"
                 f"Bill of Lading: {bl}\n"
                 f"Container: {container}\n"
                 f"Carrier: {carrier}\n\n"
                 f"Approve it here:\n{approve_url}\n\n"
-                f"If you don't act within 3 days it will be approved automatically.\n\n"
-                f"— The Tydline Team"
+                f"If you don't act within 3 days I'll approve it automatically.\n\n"
+                f"— TASA"
             )
             await send_email(
                 to=user.email,
@@ -341,8 +341,8 @@ async def send_approval_request_notification(shipment_id: uuid.UUID) -> None:
         )
         wa_phones = list(wa_result.scalars().all())
         wa_text = (
-            f"Hi! A new shipment (BL: {bl}) has been submitted and is waiting for your approval.\n\n"
-            f"Tap the link below to approve it and begin tracking:\n{approve_url}"
+            f"Hi, TASA here. I've received a new shipment (BL: {bl}) and need your approval before I can start tracking it.\n\n"
+            f"Tap the link below to approve:\n{approve_url}"
         )
         for phone_record in wa_phones:
             await _send_whatsapp(phone_record.phone, wa_text)
@@ -358,18 +358,6 @@ async def send_tracking_not_found_notification(
     """
     from app.services.email import send_email
 
-    reference = shipment.bill_of_lading or shipment.container_number or "your shipment"
-    subject = f"Tracking not found: {reference}"
-    text_body = (
-        f"We couldn't find any tracking information for the Bill of Lading / "
-        f"container number: {reference}.\n\n"
-        f"This usually means the number was entered incorrectly or the carrier "
-        f"hasn't published tracking data yet.\n\n"
-        f"Please double-check the Bill of Lading number and update it in your "
-        f"dashboard, or contact your carrier for the correct reference.\n\n"
-        f"— The Tydline Team"
-    )
-
     result = await session.execute(
         select(orm.User).where(orm.User.id == shipment.user_id)
     )
@@ -377,16 +365,38 @@ async def send_tracking_not_found_notification(
     if not user:
         return
 
+    reference = shipment.bill_of_lading or shipment.container_number or "your shipment"
+    subject = f"Tracking not found: {reference}"
+    text_body = (
+        f"Hi, TASA here. I tried to look up tracking information for {reference} "
+        f"but couldn't find anything.\n\n"
+        f"This usually means the number was entered incorrectly or the carrier "
+        f"hasn't published data yet.\n\n"
+        f"Please double-check the reference and update it in your dashboard, "
+        f"or contact your carrier for the correct number.\n\n"
+        f"— TASA"
+    )
+
+    html_body: str | None = None
+    template_path = _TEMPLATE_DIR / "tracking-not-found.html"
+    try:
+        html = template_path.read_text(encoding="utf-8")
+        html = html.replace("{{reference}}", reference)
+        html = html.replace("{{dashboard_url}}", _DASHBOARD_URL)
+        html_body = html
+    except Exception as exc:
+        logger.warning("Could not load tracking-not-found email template: %s", exc)
+
     if user.email:
-        await send_email(to=user.email, subject=subject, text_body=text_body)
+        await send_email(to=user.email, subject=subject, text_body=text_body, html_body=html_body)
 
     result = await session.execute(
         select(orm.UserWhatsAppPhone).where(orm.UserWhatsAppPhone.user_id == user.id)
     )
     wa_phones = list(result.scalars().all())
     wa_text = (
-        f"Hi! We couldn't find tracking info for {reference}. "
-        f"Kindly double-check the Bill of Lading number on your Tydline dashboard."
+        f"Hi, TASA here. I tried to find tracking info for {reference} but came up empty. "
+        f"Please double-check the BL number on your Tydline dashboard or contact your carrier."
     )
     for phone_record in wa_phones:
         await _send_whatsapp(phone_record.phone, wa_text)

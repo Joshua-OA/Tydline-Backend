@@ -433,6 +433,6 @@ async def _send_shipment_added_email(
         items.append("BL: " + ", ".join(bl_numbers))
     if container_numbers:
         items.append("Containers: " + ", ".join(container_numbers))
-    text_body = f"Shipments added to your Tydline account (pending approval):\n\n" + "\n".join(items) + f"\n\nApprove at: {dashboard_url}"
+    text_body = f"Hi, TASA here. I've picked up the following shipment(s) and added them to your account. They need your approval before I start tracking:\n\n" + "\n".join(items) + f"\n\nApprove at: {dashboard_url}\n\n— TASA"
 
     await send_email(to=to, subject="Shipments added — pending approval", text_body=text_body, html_body=html)

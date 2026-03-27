@@ -169,7 +169,7 @@ async def _handle_media_message(
             ai_result = await extract_email_shipment_data(subject=doc.filename or "", body=doc.caption)
 
     _no_data_reply = (
-        "I received your file but couldn't find any container or BL numbers in it. "
+        "Hi, TASA here. I received your file but couldn't find any container or BL numbers in it. "
         "Please ensure the document contains a container number or Bill of Lading reference."
     )
 
@@ -196,8 +196,8 @@ async def _handle_media_message(
         lines.append("Container(s): " + ", ".join(containers))
     items = "\n• ".join(lines)
     return (
-        f"The following shipment(s) have been added:\n• {items}\n\n"
-        "Would you like to approve them to begin tracking?"
+        f"Hi, TASA here. I've added the following shipment(s) to your account:\n• {items}\n\n"
+        "Would you like to approve them so I can start tracking?"
     )
 
 # ---------------------------------------------------------------------------
@@ -453,9 +453,9 @@ async def whatsapp_webhook(
                 if containers:
                     lines.append("Container(s): " + ", ".join(containers))
                 items = "\n• ".join(lines)
-                reply = f"The following shipment(s) have been added:\n• {items}\n\nWould you like to approve them to begin tracking?"
+                reply = f"Hi, TASA here. I've added the following shipment(s) to your account:\n• {items}\n\nWould you like to approve them so I can start tracking?"
             else:
-                reply = "I received the forwarded message but couldn't find any container or BL numbers in it. Please forward a message that includes a BL or container number."
+                reply = "Hi, TASA here. I received the forwarded message but couldn't find any container or BL numbers in it. Please forward a message that includes a BL or container number."
             return _make_reply(sender_phone, reply)
 
         # --- Direct message: extract any shipping refs then run agent ----------
