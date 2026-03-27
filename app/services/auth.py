@@ -9,6 +9,7 @@ Flow:
 
 import hashlib
 import logging
+import random
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -103,6 +104,58 @@ async def verify_magic_link(token: str, db: AsyncSession) -> User | None:
         "verify_magic_link: success user_id=%s email=%s reused_auth_token=%s",
         user.id, user.email, had_auth_token,
     )
+    return user
+
+
+async def generate_otp(user: User, db: AsyncSession) -> str:
+    """
+    Generate a 6-digit OTP, persist its hash + expiry on *user*, return the raw code.
+    Shares the same expiry window as the magic link token.
+    """
+    raw_otp = str(random.randint(100_000, 999_999))
+    user.otp_code = _hash_token(raw_otp)
+    user.otp_expires_at = datetime.now(tz=timezone.utc) + timedelta(minutes=_TOKEN_EXPIRY_MINUTES)
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    logger.info("generate_otp: user_id=%s email=%s otp_expires_at=%s", user.id, user.email, user.otp_expires_at.isoformat())
+    return raw_otp
+
+
+async def verify_otp(email: str, otp: str, db: AsyncSession) -> User | None:
+    """
+    Validate *otp* for *email*, clear OTP fields, and issue (or reuse) an auth_token.
+    Returns the User on success, None on failure.
+    """
+    otp_hash = _hash_token(otp)
+    result = await db.execute(select(User).where(User.email == email.lower().strip()))
+    user = result.scalar_one_or_none()
+
+    if user is None:
+        logger.warning("verify_otp: no user found for email %s", email)
+        return None
+
+    if user.otp_code is None or user.otp_code != otp_hash:
+        logger.warning("verify_otp: otp mismatch for user_id=%s", user.id)
+        return None
+
+    now = datetime.now(tz=timezone.utc)
+    if user.otp_expires_at is None or now > user.otp_expires_at:
+        logger.warning("verify_otp: otp expired for user_id=%s (expired=%s now=%s)", user.id, user.otp_expires_at, now.isoformat())
+        user.otp_code = None
+        user.otp_expires_at = None
+        db.add(user)
+        await db.commit()
+        return None
+
+    user.otp_code = None
+    user.otp_expires_at = None
+    if not user.auth_token:
+        user.auth_token = secrets.token_urlsafe(32)
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    logger.info("verify_otp: success user_id=%s email=%s", user.id, user.email)
     return user
 
 

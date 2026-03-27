@@ -21,6 +21,8 @@ class User(Base):
     subscription_status: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
     magic_link_token: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    otp_code: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    otp_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     auth_token: Mapped[str | None] = mapped_column(String(255), unique=True, index=True, nullable=True)
     plan: Mapped[str | None] = mapped_column(String(32), nullable=True)             # starter | growth | pro | custom
     payment_session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)

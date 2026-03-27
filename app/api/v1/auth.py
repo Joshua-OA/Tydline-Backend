@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.orm import User, UserWhatsAppPhone
-from app.services.auth import generate_magic_link, user_id_from_email, verify_magic_link
+from app.services.auth import generate_magic_link, generate_otp, user_id_from_email, verify_magic_link, verify_otp
 from app.services.email import send_email
 
 logger = logging.getLogger(__name__)
@@ -69,6 +69,7 @@ async def request_magic_link(request: Request, payload: RequestLinkBody, db: DbS
     frontend_url = origin if "localhost" in origin else None
     logger.info("request-link: magic link will point to %s", frontend_url or settings.frontend_url)
     link = await generate_magic_link(user, db, frontend_url=frontend_url)
+    otp_code = await generate_otp(user, db)
 
     if payload.metadata:
         state = base64.urlsafe_b64encode(
@@ -78,9 +79,9 @@ async def request_magic_link(request: Request, payload: RequestLinkBody, db: DbS
 
     text_body = (
         f"Hi,\n\n"
-        f"Click the link below to sign in to Tydline. "
-        f"This link expires in 15 minutes.\n\n"
-        f"{link}\n\n"
+        f"Sign in to Tydline using one of the options below. Both expire in 30 minutes.\n\n"
+        f"Option 1 — Click this link:\n{link}\n\n"
+        f"Option 2 — Enter this code on the sign-in page:\n{otp_code}\n\n"
         f"If you did not request this, you can safely ignore this email.\n\n"
         f"— The Tydline Team"
     )
@@ -89,7 +90,12 @@ async def request_magic_link(request: Request, payload: RequestLinkBody, db: DbS
     template_path = Path(__file__).parents[3] / "emails" / "magic-link.html"
     try:
         html_body = template_path.read_text(encoding="utf-8")
-        html_body = html_body.replace("{{email}}", payload.email).replace("{{magic_link}}", link)
+        html_body = (
+            html_body
+            .replace("{{email}}", payload.email)
+            .replace("{{magic_link}}", link)
+            .replace("{{otp_code}}", otp_code)
+        )
     except Exception:
         logger.warning("request-link: could not load magic-link email template from %s", template_path)
 
@@ -149,6 +155,55 @@ async def verify_token(
     # Same-site production traffic (tydline.com → api.tydline.com) uses Lax.
     samesite = "none" if is_localhost else "lax"
     logger.info("verify: user %s authenticated — setting cookie secure=True samesite=%s", user.id, samesite)
+    response.set_cookie(
+        key=_COOKIE_NAME,
+        value=user.auth_token,
+        max_age=_COOKIE_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite=samesite,
+    )
+    wa_result = await db.execute(
+        select(UserWhatsAppPhone).where(UserWhatsAppPhone.user_id == user.id).limit(1)
+    )
+    wa_row = wa_result.scalar_one_or_none()
+    return {
+        "user_id": str(user.id),
+        "subscription_status": user.subscription_status,
+        "tracking_email": user.tracking_email,
+        "wa_phone": wa_row.phone if wa_row else None,
+    }
+
+
+class VerifyOtpBody(BaseModel):
+    email: EmailStr
+    otp: str
+
+
+@router.post("/verify-otp", status_code=status.HTTP_200_OK)
+async def verify_otp_endpoint(
+    request: Request,
+    response: Response,
+    payload: VerifyOtpBody,
+    db: DbSessionDep,
+) -> dict:
+    """
+    Exchange an OTP code for a session cookie.
+    Sets an HttpOnly cookie — frontend receives user_id + subscription_status
+    but never sees the raw auth_token value.
+    """
+    origin = request.headers.get("origin", "")
+    is_localhost = "localhost" in origin
+    logger.info("verify-otp: email=%s origin=%r", payload.email, origin or "(none)")
+
+    user = await verify_otp(payload.email, payload.otp, db)
+
+    if user is None:
+        logger.warning("verify-otp: invalid or expired OTP for email=%s", payload.email)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired code")
+
+    samesite = "none" if is_localhost else "lax"
+    logger.info("verify-otp: user %s authenticated — setting cookie secure=True samesite=%s", user.id, samesite)
     response.set_cookie(
         key=_COOKIE_NAME,
         value=user.auth_token,

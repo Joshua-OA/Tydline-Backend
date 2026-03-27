@@ -26,6 +26,15 @@ logger = logging.getLogger(__name__)
 _TEMPLATE_DIR = Path(__file__).parent.parent.parent / "emails"
 _DASHBOARD_URL = "https://tydline.com/dashboard"
 
+def _whatsapp_enabled(user: "orm.User", wa_phones: list) -> bool:
+    """
+    Return True if this user should receive WhatsApp notifications.
+    Any user who has registered a WhatsApp phone gets WhatsApp notifications,
+    regardless of plan. Growth/pro/custom plan users who also have a phone
+    registered are the primary target, but starter users with a phone get it too.
+    """
+    return bool(wa_phones)
+
 
 def _render_shipment_update_html(
     container_number: str,
@@ -253,21 +262,27 @@ async def send_approval_tracking_notification(
             )
 
     # ── WhatsApp recipients ───────────────────────────────────────────────────
-    bl_number = shipment.bill_of_lading or shipment.container_number or "N/A"
-    eta_date = shipment.eta.strftime("%-d %B %Y") if shipment.eta else "TBD"
-    relative = _relative_arrival(shipment.eta)
+    if _whatsapp_enabled(user, wa_phones):
+        bl_number = shipment.bill_of_lading or shipment.container_number or "N/A"
+        eta_date = shipment.eta.strftime("%-d %B %Y") if shipment.eta else "TBD"
+        relative = _relative_arrival(shipment.eta)
 
-    wa_recipients: list[str] = [p.phone for p in wa_phones]
-    wa_recipients.extend(
-        p.contact_value for p in notify_parties if p.channel == "whatsapp"
-    )
+        wa_recipients: list[str] = [p.phone for p in wa_phones]
+        wa_recipients.extend(
+            p.contact_value for p in notify_parties if p.channel == "whatsapp"
+        )
 
-    for phone in wa_recipients:
-        await _send_whatsapp_template(
-            phone_number=phone,
-            bl_number=bl_number,
-            eta_date=eta_date,
-            relative_arrival=relative,
+        for phone in wa_recipients:
+            await _send_whatsapp_template(
+                phone_number=phone,
+                bl_number=bl_number,
+                eta_date=eta_date,
+                relative_arrival=relative,
+            )
+    else:
+        logger.info(
+            "send_approval_tracking_notification: WhatsApp skipped for user_id=%s (no registered phones)",
+            user.id,
         )
 
 
@@ -340,12 +355,18 @@ async def send_approval_request_notification(shipment_id: uuid.UUID) -> None:
             select(orm.UserWhatsAppPhone).where(orm.UserWhatsAppPhone.user_id == user.id)
         )
         wa_phones = list(wa_result.scalars().all())
-        wa_text = (
-            f"Hi, TASA here. I've received a new shipment (BL: {bl}) and need your approval before I can start tracking it.\n\n"
-            f"Tap the link below to approve:\n{approve_url}"
-        )
-        for phone_record in wa_phones:
-            await _send_whatsapp(phone_record.phone, wa_text)
+        if _whatsapp_enabled(user, wa_phones):
+            wa_text = (
+                f"Hi, TASA here. I've received a new shipment (BL: {bl}) and need your approval before I can start tracking it.\n\n"
+                f"Tap the link below to approve:\n{approve_url}"
+            )
+            for phone_record in wa_phones:
+                await _send_whatsapp(phone_record.phone, wa_text)
+        else:
+            logger.info(
+                "send_approval_request_notification: WhatsApp skipped for user_id=%s (no registered phones)",
+                user.id,
+            )
 
 
 async def send_tracking_not_found_notification(
@@ -394,12 +415,22 @@ async def send_tracking_not_found_notification(
         select(orm.UserWhatsAppPhone).where(orm.UserWhatsAppPhone.user_id == user.id)
     )
     wa_phones = list(result.scalars().all())
-    wa_text = (
-        f"Hi, TASA here. I tried to find tracking info for {reference} but came up empty. "
-        f"Please double-check the BL number on your Tydline dashboard or contact your carrier."
-    )
-    for phone_record in wa_phones:
-        await _send_whatsapp(phone_record.phone, wa_text)
+    if _whatsapp_enabled(user, wa_phones):
+        wa_text = (
+            f"Hi, TASA here. I tried to find tracking info for {reference} but came up empty. "
+            f"Please double-check the BL number on your Tydline dashboard or contact your carrier."
+        )
+        for phone_record in wa_phones:
+            await _send_whatsapp(phone_record.phone, wa_text)
+        logger.info(
+            "send_tracking_not_found_notification: notified user_id=%s via email+whatsapp ref=%s",
+            user.id, reference,
+        )
+    else:
+        logger.info(
+            "send_tracking_not_found_notification: notified user_id=%s via email only ref=%s (no WhatsApp registered)",
+            user.id, reference,
+        )
 
 
 async def send_shipment_update_notification(

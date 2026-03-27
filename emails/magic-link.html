@@ -25,23 +25,45 @@
             <td style="padding:36px 32px 28px;text-align:center;">
 
               <h1 style="margin:0 0 10px;font-size:20px;font-weight:800;color:#052698;letter-spacing:-0.3px;">
-                Check your email
+                Sign in to Tydline
               </h1>
               <p style="margin:0 0 6px;font-size:14px;color:#000000;line-height:1.6;">
-                We sent a secure login link to
+                We received a sign-in request for
               </p>
               <p style="margin:0 0 28px;font-size:14px;font-weight:600;color:#052698;line-height:1.6;">
                 {{email}}
               </p>
 
-              <!-- CTA Button -->
+              <!-- Option 1: CTA Button -->
+              <p style="margin:0 0 10px;font-size:12px;font-weight:600;color:#000000;opacity:0.5;text-transform:uppercase;letter-spacing:0.8px;">
+                Option 1 &mdash; Click the button
+              </p>
               <a href="{{magic_link}}"
                  style="display:inline-block;background-color:#052698;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;padding:12px 32px;letter-spacing:0.2px;">
                 Continue to Tydline &rarr;
               </a>
 
+              <!-- Option 2: Copy link -->
+              <p style="margin:28px 0 8px;font-size:12px;font-weight:600;color:#000000;opacity:0.5;text-transform:uppercase;letter-spacing:0.8px;">
+                Option 2 &mdash; Copy the link
+              </p>
+              <div style="background-color:#f5f7ff;border:1px solid rgba(5,38,152,0.15);padding:10px 14px;word-break:break-all;text-align:left;">
+                <a href="{{magic_link}}" style="font-size:12px;color:#052698;text-decoration:none;line-height:1.6;">{{magic_link}}</a>
+              </div>
+
+              <!-- Option 3: OTP code -->
+              <p style="margin:28px 0 8px;font-size:12px;font-weight:600;color:#000000;opacity:0.5;text-transform:uppercase;letter-spacing:0.8px;">
+                Option 3 &mdash; Enter this code
+              </p>
+              <div style="display:inline-block;background-color:#052698;color:#ffffff;font-size:32px;font-weight:800;letter-spacing:8px;padding:14px 28px;">
+                {{otp_code}}
+              </div>
+              <p style="margin:10px 0 0;font-size:13px;color:#000000;line-height:1.6;">
+                Type this code on the sign-in page if the link doesn't work.
+              </p>
+
               <p style="margin:24px 0 0;font-size:12px;color:#000000;opacity:0.5;line-height:1.6;">
-                This link expires in 15 minutes and can only be used once.
+                This link and code expire in 30 minutes and can only be used once.
               </p>
             </td>
           </tr>
