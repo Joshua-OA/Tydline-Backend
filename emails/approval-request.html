@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Shipment approval request — Tydline</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f5f7ff;font-family:'Inter',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f5f7ff;padding:40px 16px;">
+    <tr>
+      <td align="center">
+        <table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background-color:#ffffff;border:1px solid rgba(5,38,152,0.12);">
+
+          <!-- Header -->
+          <tr>
+            <td style="padding:24px 32px;border-bottom:1px solid rgba(5,38,152,0.12);">
+              <img src="https://tydline.com/tydline-sqaurlogo.png"
+                   width="48" height="48" alt="Tydline"
+                   style="display:block;" />
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:36px 32px 28px;text-align:center;">
+
+              <h1 style="margin:0 0 8px;font-size:20px;font-weight:800;color:#052698;letter-spacing:-0.3px;">
+                Shipment pending approval
+              </h1>
+              <p style="margin:0 0 28px;font-size:14px;color:#000000;opacity:0.6;line-height:1.6;">
+                A new shipment has been submitted and is waiting for your approval before tracking begins.
+              </p>
+
+              <!-- Shipment details box -->
+              <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid rgba(5,38,152,0.12);background-color:#FCFDFF;margin-bottom:28px;text-align:left;">
+                <tr>
+                  <td style="padding:16px 20px;border-bottom:1px solid rgba(5,38,152,0.08);">
+                    <span style="font-size:12px;color:#000000;opacity:0.5;display:block;margin-bottom:4px;">Bill of Lading</span>
+                    <span style="font-size:15px;font-weight:700;color:#052698;">{{bill_of_lading}}</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:16px 20px;border-bottom:1px solid rgba(5,38,152,0.08);">
+                    <span style="font-size:12px;color:#000000;opacity:0.5;display:block;margin-bottom:4px;">Container number</span>
+                    <span style="font-size:14px;font-weight:600;color:#000000;">{{container_number}}</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:16px 20px;">
+                    <span style="font-size:12px;color:#000000;opacity:0.5;display:block;margin-bottom:4px;">Carrier</span>
+                    <span style="font-size:14px;font-weight:600;color:#000000;">{{carrier}}</span>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Approve CTA -->
+              <a href="{{approve_url}}"
+                 style="display:inline-block;background-color:#052698;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;padding:14px 36px;letter-spacing:0.2px;margin-bottom:16px;">
+                Approve Now &rarr;
+              </a>
+
+              <p style="margin:16px 0 0;font-size:12px;color:#000000;opacity:0.45;line-height:1.6;">
+                Or log in to your dashboard and review it under <strong>Approvals</strong>.<br />
+                If you don't approve within 3 days, it will be approved automatically.
+              </p>
+
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding:16px 32px;border-top:1px solid rgba(5,38,152,0.12);text-align:center;">
+              <p style="margin:0;font-size:12px;color:#000000;opacity:0.45;">
+                &copy; 2026 Tydline. All rights reserved.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

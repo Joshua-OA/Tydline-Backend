@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.api.deps import require_auth_token
+from app.core.config import settings
 from app.core.plans import PURCHASABLE_PLANS, get_plan
 from app.db.session import get_db
 from app.models.orm import Coupon, User
@@ -197,6 +198,47 @@ async def confirm_payment(
     )
 
     return {"status": "active", "plan": current_user.plan}
+
+
+@router.post("/request-beta-access", status_code=status.HTTP_200_OK)
+async def request_beta_access(
+    current_user: CurrentUserDep,
+) -> dict:
+    """
+    Record a beta access request and notify both the user and the team.
+    The user receives a confirmation; the team receives an action email to send a coupon.
+    """
+    logger.info("Beta access requested by user %s (%s)", current_user.id, current_user.email)
+
+    # Confirmation to the user
+    await send_email(
+        to=current_user.email,
+        subject="You're on the Tydline beta list!",
+        text_body=(
+            f"Hi,\n\n"
+            f"Thanks for your interest in Tydline! We've received your request and will send "
+            f"you a coupon code shortly so you can get started.\n\n"
+            f"We'll be in touch soon.\n\n"
+            f"— The Tydline Team"
+        ),
+    )
+
+    # Internal notification to the team
+    team_email = settings.email_from
+    if team_email:
+        await send_email(
+            to=team_email,
+            subject=f"Beta access request: {current_user.email}",
+            text_body=(
+                f"New beta access request:\n\n"
+                f"Email: {current_user.email}\n"
+                f"Company: {current_user.company_name or '—'}\n"
+                f"User ID: {current_user.id}\n\n"
+                f"Send them a coupon to get them onboarded."
+            ),
+        )
+
+    return {"message": "Request received — check your email"}
 
 
 class ApplyCouponBody(BaseModel):

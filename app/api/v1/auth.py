@@ -14,12 +14,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, EmailStr
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.orm import User
+from app.models.orm import User, UserWhatsAppPhone
 from app.services.auth import generate_magic_link, user_id_from_email, verify_magic_link
 from app.services.email import send_email
 
@@ -132,9 +133,15 @@ async def verify_token(
             existing = await get_user_by_auth_token(tydline_auth, db)
             if existing:
                 logger.info("verify: reusing existing session for user %s", existing.id)
+                wa_result = await db.execute(
+                    select(UserWhatsAppPhone).where(UserWhatsAppPhone.user_id == existing.id).limit(1)
+                )
+                wa_row = wa_result.scalar_one_or_none()
                 return {
                     "user_id": str(existing.id),
                     "subscription_status": existing.subscription_status,
+                    "tracking_email": existing.tracking_email,
+                    "wa_phone": wa_row.phone if wa_row else None,
                 }
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
@@ -150,9 +157,15 @@ async def verify_token(
         secure=True,
         samesite=samesite,
     )
+    wa_result = await db.execute(
+        select(UserWhatsAppPhone).where(UserWhatsAppPhone.user_id == user.id).limit(1)
+    )
+    wa_row = wa_result.scalar_one_or_none()
     return {
         "user_id": str(user.id),
         "subscription_status": user.subscription_status,
+        "tracking_email": user.tracking_email,
+        "wa_phone": wa_row.phone if wa_row else None,
     }
 
 

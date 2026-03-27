@@ -471,6 +471,15 @@ async def initial_track_shipment(shipment_id: uuid.UUID) -> None:
             shipsgo_id_hint=shipsgo_id_hint,
         )
         if not tracking_data:
+            from app.services.notification import send_tracking_not_found_notification
+            try:
+                await send_tracking_not_found_notification(session, shipment)
+            except Exception:
+                logger.warning(
+                    "send_tracking_not_found_notification failed for shipment %s",
+                    shipment_id,
+                    exc_info=True,
+                )
             return
 
         await _apply_tracking_update(session, shipment, tracking_data)
@@ -533,6 +542,8 @@ async def _apply_tracking_update(
     """
     Apply normalized tracking data onto a shipment record.
     """
+    was_tracking_started = shipment.status == "tracking_started"
+
     status = tracking_data.get("status")
     eta_raw = tracking_data.get("eta")
     predicted_eta_raw = tracking_data.get("predicted_eta")
@@ -624,3 +635,15 @@ async def _apply_tracking_update(
         shipment=shipment,
         raw_tracking=raw_tracking,
     )
+
+    # Notify all channels when real data first arrives after approval
+    if was_tracking_started and has_real_data:
+        from app.services.notification import send_approval_tracking_notification
+        try:
+            await send_approval_tracking_notification(session, shipment)
+        except Exception:
+            logger.warning(
+                "send_approval_tracking_notification failed for shipment %s",
+                shipment.id,
+                exc_info=True,
+            )

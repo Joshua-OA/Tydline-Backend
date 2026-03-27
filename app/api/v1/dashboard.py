@@ -23,6 +23,7 @@ from app.api.deps import require_auth_token
 from app.db.session import get_db
 from app.models.orm import Shipment, User
 from app.schemas.shipment import ShipmentRead
+from app.services.notification import send_approval_request_notification
 from app.services.ocr import extract_bl_from_file
 from app.services.tracking import initial_track_shipment
 
@@ -244,7 +245,7 @@ async def submit_shipment(
         bill_of_lading=bill_of_lading,
         carrier=payload.carrier,
         user_id=current_user.id,
-        status="tracking_started",
+        status="pending_approval",
     )
     db.add(shipment)
     await db.commit()
@@ -254,7 +255,7 @@ async def submit_shipment(
         shipment.id, shipment.container_number, shipment.bill_of_lading,
         shipment.carrier, shipment.status, current_user.id,
     )
-    background_tasks.add_task(initial_track_shipment, shipment.id)
+    background_tasks.add_task(send_approval_request_notification, shipment.id)
     return ShipmentSubmitResponse(id=shipment.id, status=shipment.status)
 
 

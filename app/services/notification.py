@@ -6,10 +6,14 @@ Notification service responsible for:
 """
 
 import logging
+import math
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -98,6 +102,294 @@ async def _send_sms(phone_number: str, message: str) -> None:
 
     # TODO: implement SMS provider (e.g. Twilio) — currently a no-op stub.
     logger.info("SMS skipped for %s — provider not yet implemented.", phone_number[-4:])
+
+
+def _relative_arrival(eta: datetime | None) -> str:
+    """Return a human-readable relative time string like '2 weeks' or '3 days'."""
+    if eta is None:
+        return "soon"
+    now = datetime.now(timezone.utc)
+    eta_aware = eta if eta.tzinfo else eta.replace(tzinfo=timezone.utc)
+    delta_days = (eta_aware - now).days
+    if delta_days <= 0:
+        return "today"
+    if delta_days == 1:
+        return "tomorrow"
+    if delta_days < 7:
+        return f"{delta_days} days"
+    weeks = math.ceil(delta_days / 7)
+    return f"{weeks} week{'s' if weeks != 1 else ''}"
+
+
+async def _send_whatsapp_template(
+    phone_number: str,
+    bl_number: str,
+    eta_date: str,
+    relative_arrival: str,
+) -> None:
+    """
+    Send the approved 'shipment_update' WhatsApp template via the proxy.
+
+    Template body: "Hello, your shipment with Bill of Lading Number {{1}} will arrive
+    on the {{2}} which is arriving in {{3}}. This is the perfect time to begin all
+    your clearing processes"
+    """
+    if not (settings.whatsapp_proxy_url and settings.whatsapp_webhook_secret):
+        logger.debug("WhatsApp proxy not configured — skipping template message")
+        return
+
+    phone = phone_number.lstrip("+")
+    phone_suffix = phone[-4:] if len(phone) >= 4 else "****"
+
+    payload: dict[str, Any] = {
+        "to": phone,
+        "message": {
+            "type": "template",
+            "template_name": "shipment_update",
+            "language": "en_US",
+            "components": [
+                {
+                    "type": "body",
+                    "parameters": [
+                        {"type": "text", "text": bl_number},
+                        {"type": "text", "text": eta_date},
+                        {"type": "text", "text": relative_arrival},
+                    ],
+                }
+            ],
+        },
+    }
+
+    async def _post() -> httpx.Response:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            return await client.post(
+                settings.whatsapp_proxy_url,
+                headers={
+                    "X-Webhook-Secret": settings.whatsapp_webhook_secret,
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+
+    resp = await with_retries(_post)
+    if resp is None or not resp.is_success:
+        logger.warning(
+            "WhatsApp template push failed or retries exhausted (to ...%s)", phone_suffix
+        )
+
+
+async def send_approval_tracking_notification(
+    session: AsyncSession,
+    shipment: orm.Shipment,
+) -> None:
+    """
+    Called once when a shipment transitions from 'tracking_started' and real
+    tracking data arrives for the first time.
+
+    Notifies all available channels:
+    - Email: user + email notify_parties — AI-drafted body via shipment-update.html
+    - WhatsApp: user's registered WA phones + WhatsApp notify_parties — shipment_update template
+    """
+    user = shipment.user
+
+    # ── Gather notify parties ────────────────────────────────────────────────
+    result = await session.execute(
+        select(orm.NotifyParty).where(orm.NotifyParty.user_id == user.id)
+    )
+    notify_parties: list[orm.NotifyParty] = list(result.scalars().all())
+
+    result = await session.execute(
+        select(orm.UserWhatsAppPhone).where(orm.UserWhatsAppPhone.user_id == user.id)
+    )
+    wa_phones: list[orm.UserWhatsAppPhone] = list(result.scalars().all())
+
+    # ── Build message bodies ─────────────────────────────────────────────────
+    new_status = shipment.status or "In Transit"
+    old_status = "tracking_started"
+
+    context = _build_alert_context(shipment, new_status)
+    ai_body = await draft_logistics_alert(context)
+
+    fallback_lines = [
+        f"Your shipment {shipment.container_number or shipment.bill_of_lading} is now being tracked.",
+        f"Status: {new_status}",
+    ]
+    if shipment.eta:
+        fallback_lines.append(f"ETA: {shipment.eta.strftime('%d %B %Y')}")
+    if shipment.vessel:
+        fallback_lines.append(f"Vessel: {shipment.vessel}")
+    fallback_body = "\n".join(fallback_lines)
+
+    body = ai_body if ai_body else fallback_body
+
+    # Persist notification record
+    session.add(orm.Notification(shipment_id=shipment.id, message=body))
+    if ai_body:
+        session.add(orm.AIGeneratedMessage(shipment_id=shipment.id, channel="multi", message=body))
+    await session.commit()
+
+    # ── Email recipients ─────────────────────────────────────────────────────
+    email_recipients: list[str] = []
+    if user.email:
+        email_recipients.append(user.email)
+    email_recipients.extend(
+        p.contact_value for p in notify_parties if p.channel == "email"
+    )
+
+    if email_recipients:
+        html_body = _render_shipment_update_html(
+            container_number=shipment.container_number or "",
+            old_status=old_status,
+            new_status=new_status,
+            message=body,
+        )
+        from app.services.email import send_email
+        for recipient in email_recipients:
+            await send_email(
+                to=recipient,
+                subject=f"Shipment update: {shipment.container_number or shipment.bill_of_lading}",
+                text_body=body,
+                html_body=html_body,
+            )
+
+    # ── WhatsApp recipients ───────────────────────────────────────────────────
+    bl_number = shipment.bill_of_lading or shipment.container_number or "N/A"
+    eta_date = shipment.eta.strftime("%-d %B %Y") if shipment.eta else "TBD"
+    relative = _relative_arrival(shipment.eta)
+
+    wa_recipients: list[str] = [p.phone for p in wa_phones]
+    wa_recipients.extend(
+        p.contact_value for p in notify_parties if p.channel == "whatsapp"
+    )
+
+    for phone in wa_recipients:
+        await _send_whatsapp_template(
+            phone_number=phone,
+            bl_number=bl_number,
+            eta_date=eta_date,
+            relative_arrival=relative,
+        )
+
+
+_APP_BASE_URL = "https://tydline.com"
+
+
+async def send_approval_request_notification(shipment_id: uuid.UUID) -> None:
+    """
+    Background task: notify the shipment owner that their submission is pending approval.
+    Sends an email with an Approve button and a WhatsApp text with the approval link.
+    Uses its own DB session so it can run as a standalone background task.
+    """
+    from app.db.session import AsyncSessionLocal
+    from app.services.email import send_email
+
+    approve_url = f"{_APP_BASE_URL}/dashboard/approvals?approve={shipment_id}"
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(orm.Shipment).where(orm.Shipment.id == shipment_id)
+        )
+        shipment = result.scalar_one_or_none()
+        if not shipment:
+            logger.warning("send_approval_request_notification: shipment %s not found", shipment_id)
+            return
+
+        result = await session.execute(
+            select(orm.User).where(orm.User.id == shipment.user_id)
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            return
+
+        bl = shipment.bill_of_lading or shipment.container_number or "N/A"
+        container = shipment.container_number or "N/A"
+        carrier = shipment.carrier or "Not specified"
+
+        # ── Email ────────────────────────────────────────────────────────────
+        if user.email:
+            html_body: str | None = None
+            template_path = _TEMPLATE_DIR / "approval-request.html"
+            try:
+                html = template_path.read_text(encoding="utf-8")
+                html = html.replace("{{bill_of_lading}}", bl)
+                html = html.replace("{{container_number}}", container)
+                html = html.replace("{{carrier}}", carrier)
+                html = html.replace("{{approve_url}}", approve_url)
+                html_body = html
+            except Exception as exc:
+                logger.warning("Could not load approval-request email template: %s", exc)
+
+            text_body = (
+                f"A new shipment is waiting for your approval.\n\n"
+                f"Bill of Lading: {bl}\n"
+                f"Container: {container}\n"
+                f"Carrier: {carrier}\n\n"
+                f"Approve it here:\n{approve_url}\n\n"
+                f"If you don't act within 3 days it will be approved automatically.\n\n"
+                f"— The Tydline Team"
+            )
+            await send_email(
+                to=user.email,
+                subject=f"Action required: approve shipment {bl}",
+                text_body=text_body,
+                html_body=html_body,
+            )
+
+        # ── WhatsApp ─────────────────────────────────────────────────────────
+        wa_result = await session.execute(
+            select(orm.UserWhatsAppPhone).where(orm.UserWhatsAppPhone.user_id == user.id)
+        )
+        wa_phones = list(wa_result.scalars().all())
+        wa_text = (
+            f"Hi! A new shipment (BL: {bl}) has been submitted and is waiting for your approval.\n\n"
+            f"Tap the link below to approve it and begin tracking:\n{approve_url}"
+        )
+        for phone_record in wa_phones:
+            await _send_whatsapp(phone_record.phone, wa_text)
+
+
+async def send_tracking_not_found_notification(
+    session: AsyncSession,
+    shipment: orm.Shipment,
+) -> None:
+    """
+    Notify the user when ShipsGo returns no data for their BL/container after approval.
+    Sends via email and WhatsApp (text) so they know to verify the reference.
+    """
+    from app.services.email import send_email
+
+    reference = shipment.bill_of_lading or shipment.container_number or "your shipment"
+    subject = f"Tracking not found: {reference}"
+    text_body = (
+        f"We couldn't find any tracking information for the Bill of Lading / "
+        f"container number: {reference}.\n\n"
+        f"This usually means the number was entered incorrectly or the carrier "
+        f"hasn't published tracking data yet.\n\n"
+        f"Please double-check the Bill of Lading number and update it in your "
+        f"dashboard, or contact your carrier for the correct reference.\n\n"
+        f"— The Tydline Team"
+    )
+
+    result = await session.execute(
+        select(orm.User).where(orm.User.id == shipment.user_id)
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        return
+
+    if user.email:
+        await send_email(to=user.email, subject=subject, text_body=text_body)
+
+    result = await session.execute(
+        select(orm.UserWhatsAppPhone).where(orm.UserWhatsAppPhone.user_id == user.id)
+    )
+    wa_phones = list(result.scalars().all())
+    wa_text = (
+        f"Hi! We couldn't find tracking info for {reference}. "
+        f"Kindly double-check the Bill of Lading number on your Tydline dashboard."
+    )
+    for phone_record in wa_phones:
+        await _send_whatsapp(phone_record.phone, wa_text)
 
 
 async def send_shipment_update_notification(
