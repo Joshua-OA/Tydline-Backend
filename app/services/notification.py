@@ -166,7 +166,7 @@ async def _send_whatsapp_template(
         "message": {
             "type": "template",
             "template_name": "shipment_update",
-            "language": "en_US",
+            "language": "en",
             "components": [
                 {
                     "type": "body",
@@ -240,12 +240,12 @@ async def _send_whatsapp_not_found(
         "message": {
             "type": "template",
             "template_name": "tracking_not_found",
-            "language": "en_US",
+            "language": "en",
             "components": [
                 {
                     "type": "body",
                     "parameters": [
-                        {"type": "text", "text": reference},
+                        {"type": "text", "parameter_name": "bl_number", "text": reference},
                     ],
                 }
             ],

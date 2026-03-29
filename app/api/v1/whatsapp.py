@@ -318,7 +318,10 @@ class WhatsAppWebhookPayload(BaseModel):
 
 class WhatsAppReplyContent(BaseModel):
     type: str = "text"
-    content: str
+    content: str | None = None
+    template_name: str | None = None
+    language: str | None = None
+    components: list | None = None
 
 
 class WhatsAppWebhookResponse(BaseModel):
@@ -354,7 +357,19 @@ def _normalize_phone(raw: str) -> str:
 def _make_reply(to: str, content: str) -> WhatsAppWebhookResponse:
     return WhatsAppWebhookResponse(
         to=to,
-        message=WhatsAppReplyContent(content=content),
+        message=WhatsAppReplyContent(type="text", content=content),
+    )
+
+
+def _make_template_reply(to: str, template_name: str, language: str = "en", components: list | None = None) -> WhatsAppWebhookResponse:
+    return WhatsAppWebhookResponse(
+        to=to,
+        message=WhatsAppReplyContent(
+            type="template",
+            template_name=template_name,
+            language=language,
+            components=components or [],
+        ),
     )
 
 
@@ -457,6 +472,11 @@ async def whatsapp_webhook(
             else:
                 reply = "Hi, TASA here. I received the forwarded message but couldn't find any container or BL numbers in it. Please forward a message that includes a BL or container number."
             return _make_reply(sender_phone, reply)
+
+        # --- Hello greeting: trigger onboarding flow ---------------------------
+        if message_text.strip().lower() == "hello":
+            logger.info("whatsapp: hello greeting from user_id=%s — sending onboarding_form template", user.id)
+            return _make_template_reply(sender_phone, "onboarding_form")
 
         # --- Direct message: extract any shipping refs then run agent ----------
         logger.info(
