@@ -487,7 +487,20 @@ async def whatsapp_webhook(
                             },
                         }
                     ],
-                }
+                },
+                {
+                    "type": "button",
+                    "sub_type": "flow",
+                    "index": "0",
+                    "parameters": [
+                        {
+                            "type": "action",
+                            "action": {
+                                "flow_token": "unused"
+                            },
+                        }
+                    ],
+                },
             ])
 
         # --- Direct message: extract any shipping refs then run agent ----------
