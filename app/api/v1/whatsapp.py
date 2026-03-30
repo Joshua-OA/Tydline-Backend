@@ -476,7 +476,19 @@ async def whatsapp_webhook(
         # --- Hello greeting: trigger onboarding flow ---------------------------
         if message_text.strip().lower() == "hello":
             logger.info("whatsapp: hello greeting from user_id=%s — sending onboarding_form template", user.id)
-            return _make_template_reply(sender_phone, "onboarding_form")
+            return _make_template_reply(sender_phone, "onboarding_form", components=[
+                {
+                    "type": "header",
+                    "parameters": [
+                        {
+                            "type": "image",
+                            "image": {
+                                "link": "https://tydline.com/tydline-rectangle.png"
+                            },
+                        }
+                    ],
+                }
+            ])
 
         # --- Direct message: extract any shipping refs then run agent ----------
         logger.info(
